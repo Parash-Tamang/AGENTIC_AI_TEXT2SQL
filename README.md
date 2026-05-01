@@ -1,0 +1,1 @@
+# YOU need python version 3.11 to run chromadb and onnxruntime 
