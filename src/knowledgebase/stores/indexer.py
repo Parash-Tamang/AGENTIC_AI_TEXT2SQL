@@ -1,18 +1,3 @@
-"""
-indexer.py
-──────────
-Converts table/view schema objects and raw JSON into searchable vector
-embeddings stored in a vector database.
-
-Public surface
-──────────────
-    Indexer.index_json_from_file(path)  → int
-    Indexer.index_json_data(tables)     → int
-    Indexer.index_schemas(tables)       → int
-    Indexer.index_views(views)          → int
-    Indexer.index_all(tables, views)    → dict[str, int]
-"""
-
 from __future__ import annotations
 
 import json
@@ -170,12 +155,9 @@ class ViewModel(BaseModel):
 
 
 class IndexEntry(BaseModel):
-    """Internal unit of work passed to the vector store."""
-
     doc_id: str
     document: str
     metadata: dict[str, Any]
-
     model_config = {"frozen": True}
 
 
@@ -183,19 +165,6 @@ class IndexEntry(BaseModel):
 
 
 class Indexer:
-    """
-    Embeds table/view schema descriptions and stores them in a vector database.
-
-    Parameters
-    ----------
-    settings:
-        VectorSettings controlling embedding model, collection names, etc.
-    embedder:
-        Optional pre-built Embedder (injected for testing / reuse).
-    store:
-        Optional pre-built VectorStore (injected for testing / reuse).
-    """
-
     def __init__(
         self,
         settings: VectorSettings = DEFAULT_SETTINGS,
@@ -208,12 +177,10 @@ class Indexer:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def index_json_from_file(self, json_path: str | Path) -> int:
-        """
-        Load a JSON schema file and index all tables it contains.
-
-        Returns 0 on any load / parse error.
-        """
+    def index_json_from_file(
+        self, database_name: str, schema_type: SchemaType, json_path: str | Path
+    ) -> int:
+        """Load a JSON schema file and index all entries it contains."""
         path = Path(json_path)
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -224,72 +191,140 @@ class Indexer:
             logger.error("Invalid JSON in %s: %s", json_path, exc)
             return 0
 
-        tables = data if isinstance(data, list) else [data]
-        return self.index_json_data(tables)
+        records = data if isinstance(data, list) else [data]
+        return self.index_raw_data(database_name, records, schema_type)
 
-    def index_json_data(self, tables: list[dict]) -> int:
-        """Index table schemas supplied as raw dicts. Returns count indexed."""
+    def index_raw_data(
+        self, database_name: str, data_list: list[dict], schema_type: SchemaType
+    ) -> int:
+        """Index raw dicts as either tables or views based on schema_type."""
+        if not data_list:
+            logger.warning("No data provided to index_raw_data")
+            return 0
+
+        if schema_type == SchemaType.TABLE:
+            model_cls = TableModel
+            store_fn = lambda ids, docs, embs, metas: self._store.upsert_schemas(
+                database_name, ids, docs, embs, metas
+            )
+        else:
+            model_cls = ViewModel
+            store_fn = lambda ids, docs, embs, metas: self._store.upsert_views(
+                database_name, ids, docs, embs, metas
+            )
+
+        entries: list[IndexEntry] = []
+        for raw in data_list:
+            try:
+                model = model_cls(**raw)
+                entries.append(
+                    IndexEntry(
+                        doc_id=model.doc_id,
+                        document=model.to_document(),
+                        metadata=model.to_metadata(),
+                    )
+                )
+            except Exception as exc:
+                logger.warning("Skipping malformed %s dict: %s", schema_type.value, exc)
+
+        return self._upsert(entries, store_fn=store_fn, label=f"{schema_type.value}s")
+
+    def index_schemas(self, database_name: str, tables: list[TableSchema]) -> int:
+        """Embed and store typed TableSchema objects."""
         if not tables:
-            logger.warning("No tables provided to index_json_data")
+            logger.warning("No tables provided to index_schemas")
             return 0
 
-        entries: list[IndexEntry] = []
-        for raw in tables:
-            try:
-                model = TableModel(**raw)
-                entries.append(
-                    IndexEntry(
-                        doc_id=model.doc_id,
-                        document=model.to_document(),
-                        metadata=model.to_metadata(),
-                    )
-                )
-            except Exception as exc:
-                logger.warning("Skipping malformed table dict: %s", exc)
+        entries = [
+            IndexEntry(
+                doc_id=f"{t.database_name}.{t.schema_name}.{t.table_name}",
+                document=self._format_table_schema(t),
+                metadata={
+                    "database_name": t.database_name,
+                    "schema_name": t.schema_name,
+                    "table_name": t.table_name,
+                    "type": SchemaType.TABLE,
+                },
+            )
+            for t in tables
+        ]
+        store_fn = lambda ids, docs, embs, metas: self._store.upsert_schemas(
+            database_name, ids, docs, embs, metas
+        )
+        return self._upsert(entries, store_fn, "table schemas")
 
-        return self._upsert(entries, self._store.upsert_schemas, "table schemas")
-
-    def index_json_data_views(self, views: list[dict]) -> int:
-        """Index table schemas supplied as raw dicts. Returns count indexed."""
+    def index_views(self, database_name: str, views: list[ViewSchema]) -> int:
+        """Embed and store typed ViewSchema objects."""
         if not views:
-            logger.warning("No tables provided to index_json_data")
+            logger.warning("No views provided to index_views")
             return 0
 
-        entries: list[IndexEntry] = []
-        for raw in views:
-            try:
-                model = ViewModel(**raw)
-                entries.append(
-                    IndexEntry(
-                        doc_id=model.doc_id,
-                        document=model.to_document(),
-                        metadata=model.to_metadata(),
-                    )
-                )
-            except Exception as exc:
-                logger.warning("Skipping malformed table dict: %s", exc)
-
-        return self._upsert(entries, self._store.upsert_views, "views")
+        entries = [
+            IndexEntry(
+                doc_id=f"{v.database_name}.{v.schema_name}.{v.view_name}",
+                document=self._format_view_schema(v),
+                metadata={
+                    "database_name": v.database_name,
+                    "schema_name": v.schema_name,
+                    "view_name": v.view_name,
+                    "type": SchemaType.VIEW,
+                },
+            )
+            for v in views
+        ]
+        store_fn = lambda ids, docs, embs, metas: self._store.upsert_views(
+            database_name, ids, docs, embs, metas
+        )
+        return self._upsert(entries, store_fn, "views")
 
     def index_all(
-        self,
-        tables: list[TableSchema],
-        views: list[ViewSchema],
+        self, database_name: str, tables: list[TableSchema], views: list[ViewSchema]
     ) -> dict[str, int]:
         """Index both tables and views in a single call."""
         return {
-            "tables_indexed": self.index_schemas(tables),
-            "views_indexed": self.index_views(views),
+            "tables_indexed": self.index_schemas(database_name, tables),
+            "views_indexed": self.index_views(database_name, views),
+        }
+
+    def update_from_file(
+        self, database_name: str, schema_type: SchemaType, json_path: str | Path
+    ) -> int:
+        """Wipe collection then reload from JSON file. Removes ghost entries."""
+        if schema_type == SchemaType.TABLE:
+            self._store.clear_schemas(database_name)
+        else:
+            self._store.clear_views(database_name)
+
+        return self.index_json_from_file(database_name, schema_type, json_path)
+
+    def update_schemas(self, database_name: str, tables: list[TableSchema]) -> int:
+        """Wipe schema collection and reload from typed TableSchema objects."""
+        if not tables:
+            logger.warning("No tables provided — aborting to avoid wiping collection")
+            return 0
+        self._store.clear_schemas(database_name)
+        return self.index_schemas(database_name, tables)
+
+    def update_views(self, database_name: str, views: list[ViewSchema]) -> int:
+        """Wipe views collection and reload from typed ViewSchema objects."""
+        if not views:
+            logger.warning("No views provided — aborting to avoid wiping collection")
+            return 0
+        self._store.clear_views(database_name)
+        return self.index_views(database_name, views)
+
+    def update_all(
+        self, database_name: str, tables: list[TableSchema], views: list[ViewSchema]
+    ) -> dict[str, int]:
+        """Wipe and reload both collections in one call."""
+        return {
+            "tables_indexed": self.update_schemas(database_name, tables),
+            "views_indexed": self.update_views(database_name, views),
         }
 
     # ── Private helpers ───────────────────────────────────────────────────────
 
-    def _upsert(
-        self,
-        entries: list[IndexEntry],
-        store_fn: Callable,
-        label: str,
-    ) -> int:
+    def _upsert(self, entries: list[IndexEntry], store_fn: Callable, label: str) -> int:
         if not entries:
             logger.warning("No valid entries to index for %s", label)
             return 0
@@ -307,25 +342,13 @@ class Indexer:
             logger.error("Failed to index %s: %s", label, exc)
             return 0
 
-    # ── Text formatters for typed schema objects ──────────────────────────────
+    # ── Text formatters ───────────────────────────────────────────────────────
 
     @staticmethod
     def _format_table_schema(table: TableSchema) -> str:
-        """
-        Produce a rich natural-language document for a TableSchema.
-
-        Example
-        -------
-        Table: public.orders
-        Description: Stores customer orders
-        Columns:
-          - id (INTEGER) [PK]
-          - customer_id (INTEGER) [FK] → customers.id | Samples: 1, 2, 3
-        """
         lines = [f"Table: {table.schema_name}.{table.table_name}"]
         if table.table_description:
             lines.append(f"Description: {table.table_description}")
-
         lines.append("Columns:")
         for col in table.columns:
             upper = (col.constraint or "").upper().strip()
@@ -337,7 +360,6 @@ class Indexer:
                 constraint = Constraint.NOT_NULL
             else:
                 constraint = Constraint.NULL
-
             parts = [f"  - {col.name} ({col.type}) [{constraint.value}]"]
             if col.relation:
                 parts.append(f"→ {col.relation}")
@@ -347,38 +369,21 @@ class Indexer:
                 preview = ", ".join(col.sample_values[:_SAMPLE_LIMIT])
                 parts.append(f"| Samples: {preview}")
             lines.append(" ".join(parts))
-
         return "\n".join(lines)
 
     @staticmethod
     def _format_view_schema(view: ViewSchema) -> str:
-        """
-        Produce a rich natural-language document for a ViewSchema.
-
-        Example
-        -------
-        View: dbo.active_customers
-        Description: Customers with active subscriptions
-        Columns:
-          - customer_id (INT)
-          - full_name (NVARCHAR) | Info: Full display name
-        Definition:
-          SELECT ...
-        """
         lines = [f"View: {view.schema_name}.{view.view_name}"]
         if view.view_description:
             lines.append(f"Description: {view.view_description}")
-
         lines.append("Columns:")
         for col in view.columns:
             parts = [f"  - {col.name} ({col.type})"]
             if col.description:
                 parts.append(f"| Info: {col.description}")
             lines.append(" ".join(parts))
-
         if view.view_definition:
             lines.append(f"Definition:\n{view.view_definition.strip()}")
-
         return "\n".join(lines)
 
 
