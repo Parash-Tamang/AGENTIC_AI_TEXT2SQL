@@ -1,137 +1,273 @@
+"""
+retriever.py
+────────────
+Smart semantic retrieval built on top of VectorStore.query_schemas /
+query_views — all database / schema / table / view filters are handled
+by VectorStore, not raw ChromaDB calls.
+
+Public surface
+──────────────
+    retrieve_schemas(queries, store, embedder, database_name, ...)
+    retrieve_views(queries, store, embedder, database_name, ...)
+    retrieve_all(queries, store, embedder, database_name, ...)
+"""
+
+from __future__ import annotations
+
 import logging
-from enum import Enum
-from typing import Optional
+from dataclasses import dataclass
+from typing import Any, Optional
 
-from pydantic import BaseModel
-
-from .config import VectorSettings, DEFAULT_SETTINGS
 from .embedder import Embedder
 from .vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
 
-
-class SearchTarget(str, Enum):
-    SCHEMAS = "schemas"
-    VIEWS = "views"
-    ALL = "all"
+_DEFAULT_BASE_THRESHOLD = 0.55
+_DEFAULT_MAX_THRESHOLD = 0.70
+_THRESHOLD_STEP = 0.05
 
 
-class RetrievalResult(BaseModel):
-    document: str
-    metadata: dict
-    distance: float
-    source_type: str  # "table" or "view"
+# ── Result model ──────────────────────────────────────────────────────────────
 
 
-class Retriever:
+@dataclass
+class RetrievedChunk:
+    doc: str
+    dist: float
+    meta: dict[str, Any]
+    source_query: str
+
+
+# ── Internal helpers ──────────────────────────────────────────────────────────
+
+
+def _run_retrieval(
+    queries: list[str],
+    embedder: Embedder,
+    fetch_fn,  # store.query_schemas or store.query_views
+    base_threshold: float,
+    max_threshold: float,
+    min_results: int,
+    max_results: int,
+    n_per_query: int,
+) -> list[RetrievedChunk]:
     """
-    Semantic search over indexed schemas and views.
-    Returns the top-k most relevant documents for a natural language query.
+    Core retrieval loop shared by retrieve_schemas / retrieve_views / retrieve_all.
 
-    Usage:
-        retriever = Retriever()
-        results = retriever.search("which table stores customer orders?")
-        context = retriever.get_rag_context("show me revenue by product")
+    For each query:
+      1. Embed the query text.
+      2. Call fetch_fn (already bound with all filters).
+      3. Filter results by cosine distance threshold.
+      4. Expand threshold if min_results not yet reached.
+      5. Deduplicate globally by doc_id and cap at max_results.
     """
+    seen_ids: set[str] = set()
+    chunks: list[RetrievedChunk] = []
 
-    def __init__(
-        self,
-        settings: VectorSettings = DEFAULT_SETTINGS,
-        embedder: Optional[Embedder] = None,
-        store: Optional[VectorStore] = None,
-    ):
-        self._settings = settings
-        self._embedder = embedder or Embedder(settings)
-        self._store = store or VectorStore(settings)
+    for query in queries:
+        if len(chunks) >= max_results:
+            break
 
-    # ------------------------------------------------------------------ #
-    #  Public API                                                          #
-    # ------------------------------------------------------------------ #
+        embedding = embedder.embed(query)
+        threshold = base_threshold
 
-    def search(
-        self,
-        query: str,
-        top_k: Optional[int] = None,
-        target: SearchTarget = SearchTarget.ALL,
-    ) -> list[RetrievalResult]:
-        """
-        Embed the query and return top-k semantically similar schema/view docs.
+        while threshold <= max_threshold + 1e-9:
+            if len(chunks) >= max_results:
+                break
 
-        Args:
-            query:  Natural language question or keyword string.
-            top_k:  Number of results to return (defaults to settings.top_k).
-            target: Search only schemas, only views, or both.
+            candidates = fetch_fn(embedding=embedding, top_k=n_per_query)
 
-        Returns:
-            List of RetrievalResult sorted by relevance (lowest distance first).
-        """
-        k = top_k or self._settings.top_k
-        embedding = self._embedder.embed(query)
-
-        if target == SearchTarget.SCHEMAS:
-            raw = self._store.query_schemas(embedding, k)
-        elif target == SearchTarget.VIEWS:
-            raw = self._store.query_views(embedding, k)
-        else:
-            raw = self._store.query_all(embedding, k)
-
-        results = [
-            RetrievalResult(
-                document=r["document"],
-                metadata=r["metadata"],
-                distance=r["distance"],
-                source_type=r["metadata"].get("type", "unknown"),
+            logger.debug(
+                "query=%r threshold=%.2f candidates=%d total=%d",
+                query,
+                threshold,
+                len(candidates),
+                len(chunks),
             )
-            for r in raw
-        ]
 
-        logger.info(
-            "🔍 Query: '%s' → %d results (target=%s)", query, len(results), target
-        )
-        return results
+            for item in candidates:
+                if item["distance"] > threshold:
+                    continue
+                item_id = item["metadata"].get("table_name") or item["metadata"].get(
+                    "view_name"
+                )
+                if item_id in seen_ids:
+                    continue
+                seen_ids.add(item_id)
+                chunks.append(
+                    RetrievedChunk(
+                        doc=item["document"],
+                        dist=item["distance"],
+                        meta=item["metadata"],
+                        source_query=query,
+                    )
+                )
+                if len(chunks) >= max_results:
+                    break
 
-    def get_rag_context(
-        self,
-        query: str,
-        top_k: Optional[int] = None,
-        target: SearchTarget = SearchTarget.ALL,
-    ) -> str:
-        """
-        Returns a single formatted string ready to inject into an LLM prompt.
+            if len(chunks) >= min_results:
+                break
 
-        Example output injected into a system prompt:
-            ### Relevant Database Context ###
+            threshold = round(threshold + _THRESHOLD_STEP, 10)
 
-            [Table] public.orders
-            Table: public.orders
-            Description: Stores customer orders
-            Columns:
-              - id (INTEGER) [Primary Key]
-              ...
-
-            [View] dbo.active_customers
-            View: dbo.active_customers
-            ...
-        """
-        results = self.search(query, top_k=top_k, target=target)
-
-        if not results:
-            return "No relevant schema or view context found."
-
-        sections = ["### Relevant Database Context ###\n"]
-        for r in results:
-            label = (
-                f"[Table] {r.metadata.get('schema_name')}.{r.metadata.get('table_name')}"
-                if r.source_type == "table"
-                else f"[View] {r.metadata.get('schema_name')}.{r.metadata.get('view_name')}"
-            )
-            sections.append(f"{label}\n{r.document}\n")
-
-        return "\n".join(sections)
-
-    def stats(self) -> dict:
-        return self._store.stats()
+    chunks.sort(key=lambda c: c.dist)
+    return chunks
 
 
-__all__ = ["Retriever", "RetrievalResult", "SearchTarget"]
+# ── Public API ────────────────────────────────────────────────────────────────
+
+
+def retrieve_schemas(
+    queries: list[str],
+    store: VectorStore,
+    embedder: Embedder,
+    database_name: str,
+    schema_name: Optional[str] = None,
+    table_name: Optional[str] = None,
+    base_threshold: float = _DEFAULT_BASE_THRESHOLD,
+    max_threshold: float = _DEFAULT_MAX_THRESHOLD,
+    min_results: int = 5,
+    max_results: int = 10,
+    n_per_query: int = 5,
+) -> list[RetrievedChunk]:
+    """
+    Smart retrieval from the schema (tables) collection.
+
+    Filter combos
+    -------------
+    database_name only               → all tables in that database
+    database_name + schema_name      → all tables in that db.schema
+    database_name + table_name       → specific table in that database
+
+    Parameters
+    ----------
+    queries:
+        List of query strings (e.g. entity-based subqueries from upstream).
+    store:
+        VectorStore instance — owns the ChromaDB collections.
+    embedder:
+        Embedder instance — converts query strings to vectors.
+    database_name:
+        Required. Scopes all queries to this database.
+    """
+    if not database_name:
+        raise ValueError("database_name is required")
+    if not queries:
+        logger.warning("retrieve_schemas called with empty queries list")
+        return []
+
+    fetch_fn = lambda embedding, top_k: store.query_schemas(
+        embedding=embedding,
+        top_k=top_k,
+        database_name=database_name,
+        schema_name=schema_name,
+        table_name=table_name,
+    )
+
+    return _run_retrieval(
+        queries=queries,
+        embedder=embedder,
+        fetch_fn=fetch_fn,
+        base_threshold=base_threshold,
+        max_threshold=max_threshold,
+        min_results=min_results,
+        max_results=max_results,
+        n_per_query=n_per_query,
+    )
+
+
+def retrieve_views(
+    queries: list[str],
+    store: VectorStore,
+    embedder: Embedder,
+    database_name: str,
+    schema_name: Optional[str] = None,
+    view_name: Optional[str] = None,
+    base_threshold: float = _DEFAULT_BASE_THRESHOLD,
+    max_threshold: float = _DEFAULT_MAX_THRESHOLD,
+    min_results: int = 5,
+    max_results: int = 10,
+    n_per_query: int = 5,
+) -> list[RetrievedChunk]:
+    """
+    Smart retrieval from the views collection.
+
+    Filter combos
+    -------------
+    database_name only               → all views in that database
+    database_name + schema_name      → all views in that db.schema
+    database_name + view_name        → specific view in that database
+    """
+    if not database_name:
+        raise ValueError("database_name is required")
+    if not queries:
+        logger.warning("retrieve_views called with empty queries list")
+        return []
+
+    fetch_fn = lambda embedding, top_k: store.query_views(
+        embedding=embedding,
+        top_k=top_k,
+        database_name=database_name,
+        schema_name=schema_name,
+        view_name=view_name,
+    )
+
+    return _run_retrieval(
+        queries=queries,
+        embedder=embedder,
+        fetch_fn=fetch_fn,
+        base_threshold=base_threshold,
+        max_threshold=max_threshold,
+        min_results=min_results,
+        max_results=max_results,
+        n_per_query=n_per_query,
+    )
+
+
+def retrieve_all(
+    queries: list[str],
+    store: VectorStore,
+    embedder: Embedder,
+    database_name: str,
+    schema_name: Optional[str] = None,
+    base_threshold: float = _DEFAULT_BASE_THRESHOLD,
+    max_threshold: float = _DEFAULT_MAX_THRESHOLD,
+    min_results: int = 5,
+    max_results: int = 10,
+    n_per_query: int = 5,
+) -> list[RetrievedChunk]:
+    """
+    Smart retrieval across both schemas and views, merged and sorted by distance.
+
+    Filter combos
+    -------------
+    database_name only               → all tables + views in that database
+    database_name + schema_name      → all tables + views in that db.schema
+    """
+    if not database_name:
+        raise ValueError("database_name is required")
+    if not queries:
+        logger.warning("retrieve_all called with empty queries list")
+        return []
+
+    fetch_fn = lambda embedding, top_k: store.query_all(
+        embedding=embedding,
+        top_k=top_k,
+        database_name=database_name,
+        schema_name=schema_name,
+    )
+
+    return _run_retrieval(
+        queries=queries,
+        embedder=embedder,
+        fetch_fn=fetch_fn,
+        base_threshold=base_threshold,
+        max_threshold=max_threshold,
+        min_results=min_results,
+        max_results=max_results,
+        n_per_query=n_per_query,
+    )
+
+
+__all__ = ["retrieve_schemas", "retrieve_views", "retrieve_all", "RetrievedChunk"]
