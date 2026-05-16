@@ -1,7 +1,14 @@
 import tiktoken
 from groq import Groq
+import os
+from dotenv import load_dotenv
 
-client = Groq(api_key="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")
+# Load environment variables from .env file
+load_dotenv()
+
+# Get GROQ_API_KEY from environment
+api_key = os.getenv("api_key")
+client = Groq(api_key=api_key)
 user_input = (
     "Write a SQL query to find the top 5 customers by total sales in the last month."
 )

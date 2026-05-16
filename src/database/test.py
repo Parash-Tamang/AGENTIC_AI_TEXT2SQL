@@ -65,21 +65,21 @@ except Exception as e:
 #     print("Validation error:", e)
 
 
-# try:
+try:
 
-#     schema = execute_view(
-#         view_name="vGetAllCategories",
-#         db_type="mssql",
-#         server="(localdb)\\MSSQLLocalDB",
-#         database="AdventureWorksLT2019",
-#         username="sa",
-#         password="1234567890",
-#         timeout=1,
-#     )
-#     if schema is not None:
-#         print(schema)
-#     else:
-#         print("Failed to generate schema.")
+    schema = execute_view(
+        view_name="vGetAllCategories",
+        db_type="mssql",
+        server="(localdb)\\MSSQLLocalDB",
+        database="AdventureWorksLT2019",
+        username="sa",
+        password="1234567890",
+        timeout=1,
+    )
+    if schema is not None:
+        print(schema)
+    else:
+        print("Failed to generate schema.")
 
-# except Exception as e:
-#     print("Validation error:", e)
+except Exception as e:
+    print("Validation error:", e)

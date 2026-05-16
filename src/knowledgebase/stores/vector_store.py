@@ -198,7 +198,13 @@ class VectorStore:
             self._client.delete_collection(f"{database_name}__schemas")
             logger.info("🗑️  Schema collection cleared for '%s'", database_name)
         except Exception as exc:
-            logger.error("❌ Failed to clear schema collection: %s", exc)
+            error_msg = str(exc)
+            if "does not exist" in error_msg:
+                logger.warning(
+                    "Schema collection does not exist for '%s'", database_name
+                )
+            else:
+                logger.error("❌ Failed to clear schema collection: %s", exc)
             raise
 
     def clear_views(self, database_name: str) -> None:
@@ -207,7 +213,13 @@ class VectorStore:
             self._client.delete_collection(f"{database_name}__views")
             logger.info("🗑️  Views collection cleared for '%s'", database_name)
         except Exception as exc:
-            logger.error("❌ Failed to clear views collection: %s", exc)
+            error_msg = str(exc)
+            if "does not exist" in error_msg:
+                logger.warning(
+                    "Views collection does not exist for '%s'", database_name
+                )
+            else:
+                logger.error("❌ Failed to clear views collection: %s", exc)
             raise
 
     def delete_database(self, database_name: str) -> dict[str, int]:
