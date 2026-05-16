@@ -11,25 +11,46 @@ Then visit:
     - ReDoc:       http://localhost:8000/redoc
 """
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import logging
 
 from src.knowledgebase.controller.knowledgebase_controller import router
+from src.knowledgebase.config.graph_setting import graph_manager  # ✅ import singleton
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Create FastAPI app
-app = FastAPI(
-    title="Knowledge Base API",
-    description="Vector knowledge base management for database schemas and views",
-    version="1.0.0",
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
+log = logging.getLogger("app")
 
-# Add CORS middleware
+
+# ── Lifespan ──────────────────────────────────────────────────
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+
+    # ── Startup ───────────────────────────────────────────────
+    log.info("API starting up...")
+    try:
+        graph_manager.load_all()  # ✅ loads all graphs into memory
+    except Exception as e:
+        log.error(f"Graph load failed: {e}")
+
+    yield
+
+    # ── Shutdown ──────────────────────────────────────────────
+    log.info("API shutting down...")
+
+
+# ── App ───────────────────────────────────────────────────────
+
+app = FastAPI(title="Knowledge Base API", version="1.0.0", lifespan=lifespan)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -38,39 +59,46 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include routers
 app.include_router(router)
 
 
-# ── Exception Handlers ────────────────────────────────────────────────────────────
+# ── Exception Handlers ────────────────────────────────────────
 
 
 @app.exception_handler(HTTPException)
-async def unified_exception_handler(request: Request, exc: HTTPException):
-    """Unified exception handler for all HTTP errors.
-
-    Wraps all errors in the standard {success, message, data} envelope.
-    """
+async def http_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(
         status_code=exc.status_code,
         content={"success": False, "message": exc.detail, "data": None},
     )
 
 
-# ── Health Check ──────────────────────────────────────────────────────────────────
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    log.error(f"Unhandled error: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"success": False, "message": "Internal server error", "data": None},
+    )
 
 
-@app.get("/health", tags=["health"])
+# ── Health ────────────────────────────────────────────────────
+
+
+@app.get("/health", tags=["Health"])
 def health_check():
-    """Health check endpoint."""
-    return {"success": True, "message": "Knowledge Base API is running", "data": None}
+    return {
+        "success": True,
+        "message": "API is running",
+        "data": None,
+    }
 
 
 if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(
-        app,
+        "src.main:app",
         host="0.0.0.0",
         port=8000,
         reload=True,

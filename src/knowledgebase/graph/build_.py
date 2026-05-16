@@ -11,13 +11,11 @@ def build_schema_graph(schema_file: str, collection_name: str, base_dir: str) ->
     collection_dir = os.path.join(base_dir, collection_name.lower())
     os.makedirs(collection_dir, exist_ok=True)
 
-    # ── GraphML instead of pickle (portable, .NET readable) ──
     graph_path = os.path.join(collection_dir, f"{collection_name}.graphml")
 
     with open(schema_file, "r", encoding="utf-8") as f:
         schema = json.load(f)
 
-    # ── Directed graph (parent → child, reflects FK direction) ──
     graph = nx.DiGraph()
 
     for table in schema:
@@ -26,13 +24,21 @@ def build_schema_graph(schema_file: str, collection_name: str, base_dir: str) ->
 
         for column in table["columns"]:
             col_name = column["name"]
-
-            # Add column as node linked to its table
             col_node = f"{table_name}.{col_name}"
-            graph.add_node(col_node, type="column", table=table_name)
+
+            # Convert None values to empty strings for GraphML compatibility
+            col_type = column.get("type") or ""
+            description = column.get("description") or ""
+
+            graph.add_node(
+                col_node,
+                type="column",
+                table=table_name,
+                col_type=col_type,
+                description=description,
+            )
             graph.add_edge(table_name, col_node)
 
-            # Add FK relation edge with from/to columns
             relation = column.get("relation")
             if relation:
                 parts = relation.split(".")
@@ -43,11 +49,15 @@ def build_schema_graph(schema_file: str, collection_name: str, base_dir: str) ->
                     ref_col = "id"
 
                 graph.add_node(ref_table, type="table")
+                # Ensure from_col and to_col are strings for GraphML compatibility
                 graph.add_edge(
-                    table_name, ref_table, from_col=col_name, to_col=ref_col, type="fk"
+                    table_name,
+                    ref_table,
+                    from_col=str(col_name),
+                    to_col=str(ref_col),
+                    type="fk",
                 )
 
-    # ── Save as GraphML (portable) ──
     nx.write_graphml(graph, graph_path)
     logger.info("Graph saved → %s", graph_path)
     return graph_path

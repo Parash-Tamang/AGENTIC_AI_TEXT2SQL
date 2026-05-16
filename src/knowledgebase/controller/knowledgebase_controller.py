@@ -36,7 +36,11 @@ from src.database.service.view_service import ViewService
 from src.knowledgebase.stores.indexer import Indexer
 from src.knowledgebase.stores.vector_store import VectorStore
 from src.knowledgebase.graph.build_ import build_schema_graph
-from src.knowledgebase.config.graph_setting import GraphSettings, DEFAULT_GRAPH_SETTINGS
+from src.knowledgebase.config.graph_setting import (
+    GraphSettings,
+    DEFAULT_GRAPH_SETTINGS,
+    graph_manager,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +101,12 @@ class ListDatabasesResponse(BaseModel):
     total: int
 
 
+class GraphResponse(BaseModel):
+    database_name: str
+    graph_path: str
+    message: str
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
@@ -136,6 +146,11 @@ def _delete_schema_graphs(
         if os.path.exists(graph_dir):
             shutil.rmtree(graph_dir)
             logger.info("🗑️  Schema graph deleted for '%s'", database_name)
+        else:
+            logger.warning("Schema graph does not exist for '%s'", database_name)
+        # Unload from memory
+        if graph_manager.is_loaded(database_name):
+            graph_manager.unload(database_name)
     except Exception as exc:
         logger.error(
             "❌ Failed to delete schema graph for '%s': %s", database_name, exc
@@ -273,8 +288,6 @@ def create_schemas(
     try:
         schema_file = SchemaService.save_schema_snapshot(schema)
         count = Indexer().index_schemas(database_name, schema)
-        # Build schema graph after indexing
-        _build_schema_graphs(database_name, str(schema_file))
         data = IndexResponse(
             database_name=database_name,
             schema_type="table",
@@ -350,8 +363,6 @@ def update_schemas(
     try:
         schema_file = SchemaService.save_schema_snapshot(schema)
         count = Indexer().update_schemas(database_name, schema)
-        # Rebuild schema graph after updating
-        _build_schema_graphs(database_name, str(schema_file))
         data = IndexResponse(
             database_name=database_name,
             schema_type="table",
@@ -410,24 +421,46 @@ def update_views(
 )
 def delete_schemas(database_name: str) -> ApiResponse[DeleteResponse]:
     """Delete the schema collection and graph for a database (all data wiped)."""
+    deleted_items = []
+    message_parts = []
+
     try:
         VectorStore().clear_schemas(database_name)
-        # Delete schema graph too
-        _delete_schema_graphs(database_name)
-        data = DeleteResponse(
-            database_name=database_name,
-            deleted=["schemas", "schema_graph"],
-            message=f"Schema collection and graph wiped for '{database_name}'",
-        )
-        return ApiResponse(
-            success=True, message="Schemas deleted successfully", data=data
-        )
+        deleted_items.append("schemas")
+        message_parts.append("schemas removed")
+        logger.info("Schemas deleted for '%s'", database_name)
     except Exception as exc:
-        logger.error("Failed to delete schemas for '%s': %s", database_name, exc)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
-        )
+        error_msg = str(exc)
+        if "does not exist" in error_msg:
+            logger.warning("Schema collection does not exist for '%s'", database_name)
+        else:
+            logger.error("Failed to delete schemas for '%s': %s", database_name, exc)
+
+    # Delete schema graph too
+    graph_dir = os.path.join(
+        DEFAULT_GRAPH_SETTINGS.persist_directory, database_name.lower()
+    )
+    if os.path.exists(graph_dir):
+        try:
+            _delete_schema_graphs(database_name)
+            deleted_items.append("schema_graph")
+            message_parts.append("graph removed")
+        except Exception as exc:
+            logger.warning(
+                "Could not delete schema graph for '%s': %s", database_name, exc
+            )
+
+    if message_parts:
+        message = ", ".join(message_parts) + f" for '{database_name}'"
+    else:
+        message = f"No schemas found for '{database_name}'"
+
+    data = DeleteResponse(
+        database_name=database_name,
+        deleted=deleted_items,
+        message=message,
+    )
+    return ApiResponse(success=True, message="Schemas deleted successfully", data=data)
 
 
 @router.delete(
@@ -436,23 +469,47 @@ def delete_schemas(database_name: str) -> ApiResponse[DeleteResponse]:
     summary="Wipe views collection for a database",
 )
 def delete_views(database_name: str) -> ApiResponse[DeleteResponse]:
-    """Delete the views collection for a database (all data wiped)."""
+    """Delete the views collection and graph for a database (all data wiped)."""
+    deleted_items = []
+    message_parts = []
+
     try:
         VectorStore().clear_views(database_name)
-        data = DeleteResponse(
-            database_name=database_name,
-            deleted=["views"],
-            message=f"Views collection wiped for '{database_name}'",
-        )
-        return ApiResponse(
-            success=True, message="Views deleted successfully", data=data
-        )
+        deleted_items.append("views")
+        message_parts.append("views removed")
+        logger.info("Views deleted for '%s'", database_name)
     except Exception as exc:
-        logger.error("Failed to delete views for '%s': %s", database_name, exc)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
-        )
+        error_msg = str(exc)
+        if "does not exist" in error_msg:
+            logger.warning("Views collection does not exist for '%s'", database_name)
+        else:
+            logger.error("Failed to delete views for '%s': %s", database_name, exc)
+
+    # Delete schema graph too
+    graph_dir = os.path.join(
+        DEFAULT_GRAPH_SETTINGS.persist_directory, database_name.lower()
+    )
+    if os.path.exists(graph_dir):
+        try:
+            _delete_schema_graphs(database_name)
+            deleted_items.append("schema_graph")
+            message_parts.append("graph removed")
+        except Exception as exc:
+            logger.warning(
+                "Could not delete schema graph for '%s': %s", database_name, exc
+            )
+
+    if message_parts:
+        message = ", ".join(message_parts) + f" for '{database_name}'"
+    else:
+        message = f"No views found for '{database_name}'"
+
+    data = DeleteResponse(
+        database_name=database_name,
+        deleted=deleted_items,
+        message=message,
+    )
+    return ApiResponse(success=True, message="Views deleted successfully", data=data)
 
 
 @router.delete(
@@ -461,22 +518,189 @@ def delete_views(database_name: str) -> ApiResponse[DeleteResponse]:
     summary="Wipe all collections for a database",
 )
 def delete_database(database_name: str) -> ApiResponse[DeleteResponse]:
-    """Drop both schema and views collections for a database entirely."""
+    """Drop both schema and views collections, and schema graph for a database entirely."""
+    deleted_items = []
+    message_parts = []
+
+    # Try to delete schemas
     try:
         result = VectorStore().delete_database(database_name)
-        data = DeleteResponse(
+        if result["schemas_deleted"] > 0:
+            deleted_items.append("schemas")
+            message_parts.append(f"schemas removed")
+            logger.info(
+                "Deleted %d schema docs for '%s'",
+                result["schemas_deleted"],
+                database_name,
+            )
+    except Exception as exc:
+        error_msg = str(exc)
+        if "does not exist" in error_msg:
+            logger.warning("Schemas collection does not exist for '%s'", database_name)
+        else:
+            logger.error("Failed to delete schemas for '%s': %s", database_name, exc)
+
+    # Try to delete views
+    try:
+        if (
+            database_name in VectorStore().list_databases()
+            and "views" in VectorStore().list_databases()[database_name]
+        ):
+            VectorStore().clear_views(database_name)
+            deleted_items.append("views")
+            message_parts.append("views removed")
+            logger.info("Views deleted for '%s'", database_name)
+    except Exception as exc:
+        error_msg = str(exc)
+        if "does not exist" in error_msg:
+            logger.warning("Views collection does not exist for '%s'", database_name)
+        else:
+            logger.error("Failed to delete views for '%s': %s", database_name, exc)
+
+    # Try to delete schema graph
+    graph_dir = os.path.join(
+        DEFAULT_GRAPH_SETTINGS.persist_directory, database_name.lower()
+    )
+    if os.path.exists(graph_dir):
+        try:
+            _delete_schema_graphs(database_name)
+            deleted_items.append("schema_graph")
+            message_parts.append("graph removed")
+            logger.info("Schema graph deleted for '%s'", database_name)
+        except Exception as exc:
+            logger.warning(
+                "Could not delete schema graph for '%s': %s", database_name, exc
+            )
+    else:
+        logger.debug("No schema graph found for '%s'", database_name)
+
+    if message_parts:
+        message = ", ".join(message_parts) + f" for '{database_name}'"
+    else:
+        message = f"No data to delete for '{database_name}'"
+
+    data = DeleteResponse(
+        database_name=database_name,
+        deleted=deleted_items,
+        message=message,
+    )
+    return ApiResponse(success=True, message="Database deleted successfully", data=data)
+
+
+# ── GRAPHS ────────────────────────────────────────────────────────────────────
+
+
+@router.post(
+    "/{database_name}/graphs/create",
+    response_model=ApiResponse[GraphResponse],
+    status_code=status.HTTP_201_CREATED,
+    summary="Build and save schema graph from indexed schema",
+)
+def create_graph(database_name: str) -> ApiResponse[GraphResponse]:
+    """Build schema graph from the indexed schema snapshot."""
+    try:
+        # Get schema snapshot path
+        schema_file = os.path.join(
+            SchemaService.get_persist_directory(),
+            f"{database_name}_schema_snapshot.json",
+        )
+        if not os.path.exists(schema_file):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"No schema snapshot found for '{database_name}'. Create schemas first.",
+            )
+
+        graph_path = _build_schema_graphs(database_name, schema_file)
+        data = GraphResponse(
             database_name=database_name,
-            deleted=["schemas", "views"],
-            message=(
-                f"Deleted {result['schemas_deleted']} schema docs and "
-                f"{result['views_deleted']} view docs for '{database_name}'"
-            ),
+            graph_path=graph_path,
+            message=f"Schema graph created for '{database_name}'",
         )
         return ApiResponse(
-            success=True, message="Database deleted successfully", data=data
+            success=True, message="Graph created successfully", data=data
         )
+    except HTTPException:
+        raise
     except Exception as exc:
-        logger.error("Failed to delete '%s': %s", database_name, exc)
+        logger.error("Failed to create graph for '%s': %s", database_name, exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        )
+
+
+@router.put(
+    "/{database_name}/graphs/update",
+    response_model=ApiResponse[GraphResponse],
+    summary="Rebuild schema graph from indexed schema",
+)
+def update_graph(database_name: str) -> ApiResponse[GraphResponse]:
+    """Wipe and rebuild schema graph from the latest indexed schema snapshot."""
+    try:
+        # Get schema snapshot path
+        schema_file = os.path.join(
+            SchemaService.get_persist_directory(),
+            f"{database_name}_schema_snapshot.json",
+        )
+        if not os.path.exists(schema_file):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"No schema snapshot found for '{database_name}'. Create schemas first.",
+            )
+
+        # Delete existing graph
+        _delete_schema_graphs(database_name)
+        # Rebuild graph
+        graph_path = _build_schema_graphs(database_name, schema_file)
+        data = GraphResponse(
+            database_name=database_name,
+            graph_path=graph_path,
+            message=f"Schema graph rebuilt for '{database_name}'",
+        )
+        return ApiResponse(
+            success=True, message="Graph updated successfully", data=data
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Failed to update graph for '%s': %s", database_name, exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        )
+
+
+@router.delete(
+    "/{database_name}/graphs/delete",
+    response_model=ApiResponse[DeleteResponse],
+    summary="Delete schema graph for a database",
+)
+def delete_graph(database_name: str) -> ApiResponse[DeleteResponse]:
+    """Delete the schema graph for a database."""
+    try:
+        graph_dir = os.path.join(
+            DEFAULT_GRAPH_SETTINGS.persist_directory, database_name.lower()
+        )
+        if os.path.exists(graph_dir):
+            _delete_schema_graphs(database_name)
+            data = DeleteResponse(
+                database_name=database_name,
+                deleted=["schema_graph"],
+                message=f"Schema graph deleted for '{database_name}'",
+            )
+            return ApiResponse(
+                success=True, message="Graph deleted successfully", data=data
+            )
+        else:
+            logger.warning("Schema graph does not exist for '%s'", database_name)
+            data = DeleteResponse(
+                database_name=database_name,
+                deleted=[],
+                message=f"No schema graph found for '{database_name}'",
+            )
+            return ApiResponse(success=True, message="No graph to delete", data=data)
+    except Exception as exc:
+        logger.error("Failed to delete graph for '%s': %s", database_name, exc)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(exc),

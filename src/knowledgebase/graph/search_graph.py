@@ -1,5 +1,3 @@
-# src/knowledgebase/retriever.py
-
 import json
 import logging
 import networkx as nx
@@ -9,20 +7,30 @@ log = logging.getLogger("knowledgebase.retriever")
 
 
 def bfs_schema_with_joins(
-    graph: nx.DiGraph,  # ✅ passed in — loaded at startup
-    schema_map: dict,  # ✅ passed in — loaded at startup
+    graph: nx.DiGraph,
     seed_tables: list[str],
     max_hops: int = 2,
     token_limit: int = 8000,
 ) -> dict:
-    """
-    BFS from seed tables to pull related tables + join paths.
-    No disk I/O — graph and schema_map are pre-loaded at startup.
-    """
-
     log.info(f"BFS started — seeds: {seed_tables}, max_hops: {max_hops}")
 
-    # ── Validate seeds ────────────────────────────────────────
+    visited = _bfs_tables(graph, seed_tables, max_hops)
+    if not visited:
+        return {"tables": [], "schema": [], "joins": [], "token_estimate": 0}
+
+    fk_index = _build_fk_index(graph)
+    return _build_context(graph, visited, fk_index, token_limit)
+
+
+# ── BFS ───────────────────────────────────────────────────────
+
+
+def _bfs_tables(
+    graph: nx.DiGraph,
+    seed_tables: list[str],
+    max_hops: int,
+) -> set[str]:
+
     valid_seeds = [
         s
         for s in seed_tables
@@ -31,9 +39,8 @@ def bfs_schema_with_joins(
 
     if not valid_seeds:
         log.warning(f"No valid seed tables found from: {seed_tables}")
-        return {"tables": [], "schema": [], "joins": [], "token_estimate": 0}
+        return set()
 
-    # ── BFS ───────────────────────────────────────────────────
     undirected = graph.to_undirected()
     visited = set()
     queue = deque([(s, 0) for s in valid_seeds])
@@ -57,23 +64,51 @@ def bfs_schema_with_joins(
                 queue.append((neighbor, hop + 1))
 
     log.info(f"BFS complete — {len(visited)} tables: {visited}")
+    return visited
 
-    # ── FK index (avoid full edge scan per table) ─────────────
+
+# ── FK index ──────────────────────────────────────────────────
+
+
+def _build_fk_index(graph: nx.DiGraph) -> dict[str, list]:
     fk_index: dict[str, list] = {}
+
     for u, v, data in graph.edges(data=True):
         if data.get("type") == "fk":
             fk_index.setdefault(u, []).append((u, v, data))
             fk_index.setdefault(v, []).append((u, v, data))
 
-    # ── Build context ─────────────────────────────────────────
+    return fk_index
+
+
+# ── Build context ─────────────────────────────────────────────
+
+
+def _build_context(
+    graph: nx.DiGraph,
+    visited: set[str],
+    fk_index: dict[str, list],
+    token_limit: int,
+) -> dict:
+
     context_tables = []
     total_tokens = 0
     all_joins = set()
 
     for table_name in visited:
 
-        if table_name not in schema_map:
-            log.warning(f"'{table_name}' in graph but not in schema — skipping")
+        columns = [
+            {
+                "name": n.split(".")[1],
+                "type": graph.nodes[n].get("col_type", ""),
+                "description": graph.nodes[n].get("description", ""),
+            }
+            for n in graph.successors(table_name)
+            if graph.nodes[n].get("type") == "column"
+        ]
+
+        if not columns:
+            log.warning(f"'{table_name}' has no column nodes in graph — skipping")
             continue
 
         joins = []
@@ -85,7 +120,7 @@ def bfs_schema_with_joins(
 
         entry = {
             "table": table_name,
-            "columns": schema_map[table_name]["columns"],
+            "columns": columns,
             "joins": joins,
         }
         context_tables.append(entry)
@@ -106,3 +141,25 @@ def bfs_schema_with_joins(
         "joins": list(all_joins),
         "token_estimate": total_tokens,
     }
+
+
+# ── Format for prompt ─────────────────────────────────────────
+
+
+def format_schema_for_prompt(bfs_result: dict) -> str:
+    lines = ["## Relevant Schema\n"]
+
+    for table in bfs_result["schema"]:
+        lines.append(f"### {table['table']}")
+        for col in table["columns"]:
+            desc = col.get("description", "")
+            col_type = col.get("type", "")
+            lines.append(f"  - {col['name']} ({col_type}): {desc}")
+        lines.append("")
+
+    if bfs_result["joins"]:
+        lines.append("## Join Paths")
+        for join in bfs_result["joins"]:
+            lines.append(f"  - {join}")
+
+    return "\n".join(lines)
