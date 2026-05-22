@@ -17,8 +17,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import logging
 
-from src.knowledgebase.controller.knowledgebase_controller import router
+from src.knowledgebase.controller.knowledgebase_controller import router as kb_router
+from src.agent.controller.chat_controller import router as chat_router
 from src.knowledgebase.config.graph_setting import graph_manager  # ✅ import singleton
+from src.agent.observability import configure_workflow_logging
+
+configure_workflow_logging()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -59,7 +63,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(router)
+app.include_router(kb_router)
+app.include_router(chat_router)
 
 
 # ── Exception Handlers ────────────────────────────────────────

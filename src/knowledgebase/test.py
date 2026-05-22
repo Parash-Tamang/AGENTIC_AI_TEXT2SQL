@@ -101,49 +101,49 @@ results = retrieve_schemas(
 
 print(results)
 
-from src.knowledgebase.config.graph_setting import graph_manager
-from src.knowledgebase.graph.search_graph import (
-    bfs_schema_with_joins,
-    format_schema_for_prompt,
-)
+# from src.knowledgebase.config.graph_setting import graph_manager
+# from src.knowledgebase.graph.search_graph import (
+#     bfs_schema_with_joins,
+#     format_schema_for_prompt,
+# )
 
-# ── Example 2: Test Graph BFS ────────────────────────────────
-
-
-def example_test_graph():
-    logger.info("\n" + "=" * 70)
-    logger.info("EXAMPLE 2: Test Graph BFS")
-    logger.info("=" * 70)
-
-    db_id = "AdventureWorksLT2019"
-
-    # load graph
-    graph_manager.load_one(db_id)
-    graph = graph_manager.get_graph(db_id)
-
-    # sanity check — print nodes and edges
-    logger.info(f"Nodes: {graph.number_of_nodes()}")
-    logger.info(f"Edges: {graph.number_of_edges()}")
-
-    # print all table nodes
-    tables = [n for n, d in graph.nodes(data=True) if d.get("type") == "table"]
-    logger.info(f"Tables ({len(tables)}): {tables}")
-
-    # run BFS from a known seed table
-    result = bfs_schema_with_joins(
-        graph=graph,
-        seed_tables=["SalesOrderHeader"],  # ← swap with a real table name
-        max_hops=1,
-        token_limit=8000,
-    )
-
-    logger.info(f"Tables returned: {result['tables']}")
-    logger.info(f"Joins found: {result['joins']}")
-    logger.info(f"Token estimate: {result['token_estimate']}")
-
-    # Format schema for prompt
-    formatted_schema = format_schema_for_prompt(result)
-    logger.info(f"Formatted schema:\n{formatted_schema}")
+# # ── Example 2: Test Graph BFS ────────────────────────────────
 
 
-example_test_graph()
+# def example_test_graph():
+#     logger.info("\n" + "=" * 70)
+#     logger.info("EXAMPLE 2: Test Graph BFS")
+#     logger.info("=" * 70)
+
+#     db_id = "AdventureWorksLT2019"
+
+#     # load graph
+#     graph_manager.load_one(db_id)
+#     graph = graph_manager.get_graph(db_id)
+
+#     # sanity check — print nodes and edges
+#     logger.info(f"Nodes: {graph.number_of_nodes()}")
+#     logger.info(f"Edges: {graph.number_of_edges()}")
+
+#     # print all table nodes
+#     tables = [n for n, d in graph.nodes(data=True) if d.get("type") == "table"]
+#     logger.info(f"Tables ({len(tables)}): {tables}")
+
+#     # run BFS from a known seed table
+#     result = bfs_schema_with_joins(
+#         graph=graph,
+#         seed_tables=["SalesOrderHeader"],  # ← swap with a real table name
+#         max_hops=1,
+#         token_limit=8000,
+#     )
+
+#     logger.info(f"Tables returned: {result['tables']}")
+#     logger.info(f"Joins found: {result['joins']}")
+#     logger.info(f"Token estimate: {result['token_estimate']}")
+
+#     # Format schema for prompt
+#     formatted_schema = format_schema_for_prompt(result)
+#     logger.info(f"Formatted schema:\n{formatted_schema}")
+
+
+# example_test_graph()

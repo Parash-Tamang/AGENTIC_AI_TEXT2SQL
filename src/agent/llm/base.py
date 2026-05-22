@@ -9,6 +9,7 @@ class BaseLLM(ABC):
         system_prompt: str,
         user_prompt: str,
         memory: Optional[List[Dict[str, str]]] = None,
+        tools: Optional[List[Dict[str, str]]] = None,
     ) -> str:
         """
         Generate a response from the LLM.
