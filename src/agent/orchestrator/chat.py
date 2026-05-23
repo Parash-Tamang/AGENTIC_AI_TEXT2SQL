@@ -58,7 +58,7 @@ async def run_chat_pipeline(
 
     connection_data = _normalize_connection(connection)
 
-    sql_llm = get_llm(model_name="sqlcoder")
+    llm = get_llm(model_name="sqlcoder")
     trace = start_request_trace(
         {
             "user_query": user_query,
@@ -118,9 +118,9 @@ async def run_chat_pipeline(
     }
 
     llm = get_llm(model_name=model_name)
-    llm_sql = get_llm(
-        model_name="sqlcoder"
-    )  # FIX: use SQL-specific model for SQL nodes
+    # llm_sql = get_llm(
+    #     model_name="sqlcoder"
+    # )  # FIX: use SQL-specific model for SQL nodes
     nodes_registry = {
         "query_refiner": trace_node(
             "query_refiner",
@@ -192,7 +192,7 @@ async def run_chat_pipeline(
         ),
         "sql_generator": trace_node(
             "sql_generator",
-            lambda s: sql_generator_node(sql_llm, s),
+            lambda s: sql_generator_node(llm, s),
             input_builder=lambda s: {
                 "construct": s.get("construct"),
                 "retrieved_schemas": s.get("retrieved_schemas"),
