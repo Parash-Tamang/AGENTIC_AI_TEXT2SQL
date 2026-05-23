@@ -60,6 +60,7 @@ class GroqLLM(BaseLLM):
         memory: Optional[List[Dict[str, str]]] = None,
         tools: Optional[List[Dict[str, str]]] = None,
         json_mode: bool = False,  # NEW: pass True to force JSON output
+        response_format: Optional[Dict] = None,  # NEW: custom response format
     ) -> str:
         """
         Generate a response from Groq.
@@ -104,7 +105,7 @@ class GroqLLM(BaseLLM):
 
                 # JSON mode — forces valid JSON output, no prose or markdown
                 if json_mode:
-                    kwargs["response_format"] = {"type": "json_object"}
+                    kwargs["response_format"] = response_format
 
                 if tools:
                     kwargs["tools"] = tools
@@ -112,7 +113,7 @@ class GroqLLM(BaseLLM):
 
                 response = self.client.chat.completions.create(**kwargs)
                 message = response.choices[0].message
-                print(message)
+                # print(message)
 
                 # Native tool call response
                 if message.tool_calls:

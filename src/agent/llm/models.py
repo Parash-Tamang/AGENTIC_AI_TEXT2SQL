@@ -14,15 +14,19 @@ MODELS = {
     },
     # Ollama models
     "gemma:2b": {"provider": "ollama", "max_tokens": 15000},
-    "qwen2.5:7b": {
+    "qwen2.5:3b": {
         "provider": "ollama",
-        "max_tokens": 8192,
+        "max_tokens": 30000,
     },
     "llama3.1:8b": {
         "provider": "ollama",
         "max_tokens": 50000,
     },
     "gemma3:1b": {
+        "provider": "ollama",
+        "max_tokens": 30000,
+    },
+    "sqlcoder": {
         "provider": "ollama",
         "max_tokens": 30000,
     },

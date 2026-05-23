@@ -7,29 +7,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from src.agent.llm.base import BaseLLM
 from pydantic import BaseModel, Field, field_validator, model_validator
+from src.agent.utils.pretty_print import pretty_log
+from src.agent.utils.token_counter import count_tokens
 
 logger = logging.getLogger(__name__)
 
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 RESPONSE_LOG = LOG_DIR / "response_generator.jsonl"
 
-# ---------------------------------------------------------------------------
-# Token counting - graceful fallback when tiktoken is unavailable
-# ---------------------------------------------------------------------------
-try:
-    import tiktoken as _tiktoken
-
-    def _count_tokens(text: str, model: str = "gpt-4") -> int:
-        try:
-            enc = _tiktoken.encoding_for_model(model)
-        except KeyError:
-            enc = _tiktoken.get_encoding("cl100k_base")
-        return len(enc.encode(text))
-
-except ImportError:
-
-    def _count_tokens(text: str, model: str = "gpt-4") -> int:  # type: ignore[misc]
-        return len(text) // 4
+# token counting is provided by src.agent.utils.token_counter.count_tokens
 
 
 # ---------------------------------------------------------------------------
@@ -299,14 +285,18 @@ def _build_results_summary(
 def _extract_execution_info(
     state: Dict[str, Any],
 ) -> tuple[List[Any], int, Optional[str]]:
-    exec_analysis = state.get("execution_analysis") or {}
+    exec_analysis = state.get("execution_analysis")
+    if exec_analysis is None:
+        exec_analysis = {}
     if isinstance(exec_analysis, dict) and exec_analysis:
         rows = exec_analysis.get("sample_rows") or []
         rowcount = exec_analysis.get("rowcount") or 0
         error = exec_analysis.get("error")
         return rows, rowcount, error
 
-    exec_result = state.get("execution_result") or {}
+    exec_result = state.get("execution_result")
+    if exec_result is None:
+        exec_result = {}
     if isinstance(exec_result, dict):
         rows = exec_result.get("rows") or []
         rowcount = (
@@ -385,8 +375,6 @@ def response_generator_node(
     state: Dict[str, Any],
 ) -> Dict[str, Any]:
     state_data = _normalize_state(state)
-
-    print("I was called")
     user_query = str(state_data.get("user_query", "")).strip()
     if not user_query:
         return {**state_data, "response_error": "no_user_query"}
@@ -429,9 +417,19 @@ def response_generator_node(
         )
 
         try:
+            response_format = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "response_node_output",
+                    "schema": ResponseNodeOutput.model_json_schema(),
+                },
+            }
+
             raw_response = llm.generate(
                 system_prompt=_SYSTEM_PROMPT,
                 user_prompt=user_prompt,
+                response_format=response_format,
+                json_mode=True,
             )
         except Exception as exc:
             logger.error("LLM failed on conversational path: %s", exc)
@@ -442,7 +440,34 @@ def response_generator_node(
         suggestions_block = (
             _format_suggestions_block(view_suggestions) if view_suggestions else ""
         )
-        final_response = raw_response.strip() + suggestions_block
+
+        # Accept structured or raw responses
+        if isinstance(raw_response, (dict, list)):
+            resp_obj = (
+                raw_response if isinstance(raw_response, dict) else raw_response[0]
+            )
+            user_text = str(resp_obj.get("response", "")).strip()
+        else:
+            try:
+                parsed = json.loads(raw_response)
+                user_text = str(parsed.get("response", "")).strip()
+            except Exception:
+                user_text = str(raw_response).strip()
+
+        final_response = user_text + suggestions_block
+
+        pretty_log(
+            "ResponseNode:conversational",
+            state=state_data,
+            llm_metrics={"token_breakdown": {}, "latency_ms": None},
+            extra={
+                "suggestions_shown": (
+                    [s["view_name"] for s in view_suggestions]
+                    if suggestions_block
+                    else []
+                )
+            },
+        )
 
         return {
             **state_data,
@@ -465,17 +490,26 @@ def response_generator_node(
     user_prompt = _build_user_prompt(
         user_query, constructed_query, results_summary, history, schema_summary
     )
-    prompt_tokens = _count_tokens(_SYSTEM_PROMPT + user_prompt)
+    prompt_tokens = count_tokens(_SYSTEM_PROMPT + user_prompt)
 
     try:
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "response_node_output",
+                "schema": ResponseNodeOutput.model_json_schema(),
+            },
+        }
+
         raw_response = llm.generate(
             system_prompt=_SYSTEM_PROMPT,
             user_prompt=user_prompt,
+            response_format=response_format,
+            json_mode=True,
         )
     except Exception as exc:
         logger.error("LLM response generation failed: %s", exc)
         return {**state_data, "response_error": str(exc)}
-
     # ── Append view suggestions when appropriate ──────────────────────
     suggestions_block = ""
     shown_suggestion_names: List[str] = []
@@ -489,9 +523,29 @@ def response_generator_node(
             results_status,
         )
 
-    final_response = raw_response.strip() + suggestions_block
+    # Accept structured or raw responses
+    if isinstance(raw_response, (dict, list)):
+        resp_obj = raw_response if isinstance(raw_response, dict) else raw_response[0]
+    else:
+        try:
+            resp_obj = json.loads(raw_response)
+        except Exception:
+            # fallback: treat entire raw_response as the text
+            resp_obj = {
+                "response": str(raw_response),
+                "token_breakdown": {},
+                "is_empty_result": results_status == "empty",
+                "is_error": results_status == "error",
+            }
 
-    completion_tokens = _count_tokens(final_response)
+    user_text = str(resp_obj.get("response", "")).strip()
+    final_response = user_text + suggestions_block
+
+    # token accounting
+    if isinstance(raw_response, (dict, list)):
+        completion_tokens = count_tokens(json.dumps(raw_response, ensure_ascii=False))
+    else:
+        completion_tokens = count_tokens(str(raw_response))
     total_tokens = prompt_tokens + completion_tokens
     token_breakdown = {
         "prompt_tokens": prompt_tokens,

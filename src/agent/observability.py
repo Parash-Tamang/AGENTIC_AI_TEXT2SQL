@@ -38,6 +38,149 @@ def _truncate_string(text: str, max_length: int = 4000) -> str:
     return text[:max_length] + f"... [truncated {len(text) - max_length} chars]"
 
 
+def _extract_reasoning(text: str) -> str:
+    if not text:
+        return ""
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return ""
+    if isinstance(parsed, dict):
+        return str(parsed.get("reasoning", "") or parsed.get("response", ""))
+    return ""
+
+
+def _format_json_lines(value: Any, indent: int = 0) -> list[str]:
+    pad = "  " * indent
+
+    if isinstance(value, dict):
+        lines: list[str] = []
+        for key, item in value.items():
+            if isinstance(item, dict):
+                lines.append(f"{pad}{key}:")
+                lines.extend(_format_json_lines(item, indent + 1))
+            elif isinstance(item, list):
+                lines.append(f"{pad}{key}:")
+                if not item:
+                    lines.append(f"{pad}  []")
+                else:
+                    for idx, entry in enumerate(item, 1):
+                        if isinstance(entry, (dict, list)):
+                            lines.append(f"{pad}  - item {idx}:")
+                            lines.extend(_format_json_lines(entry, indent + 2))
+                        else:
+                            lines.append(f"{pad}  - {entry}")
+            else:
+                if item is None:
+                    rendered = "null"
+                elif isinstance(item, bool):
+                    rendered = "true" if item else "false"
+                else:
+                    rendered = str(item)
+                lines.append(f"{pad}{key}: {rendered}")
+        return lines
+
+    if isinstance(value, list):
+        lines = []
+        for idx, item in enumerate(value, 1):
+            if isinstance(item, (dict, list)):
+                lines.append(f"{pad}- item {idx}:")
+                lines.extend(_format_json_lines(item, indent + 1))
+            else:
+                lines.append(f"{pad}- {item}")
+        return lines
+
+    if value is None:
+        return [f"{pad}null"]
+    if isinstance(value, bool):
+        return [f"{pad}{'true' if value else 'false'}"]
+    return [f"{pad}{value}"]
+
+
+def _extract_structured_response(text: str) -> Any:
+    if not text:
+        return None
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        parts = cleaned.split("```")
+        if len(parts) >= 3:
+            cleaned = parts[1]
+            if cleaned.lstrip().startswith("json"):
+                cleaned = cleaned.split("json", 1)[-1]
+            cleaned = cleaned.strip()
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        return None
+
+
+class _WorkflowConsoleFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        message = record.getMessage()
+        try:
+            payload = json.loads(message)
+        except Exception:
+            return message
+
+        stage = str(payload.get("stage", ""))
+        event = str(payload.get("event", ""))
+        timestamp = str(payload.get("timestamp", ""))
+        request_id = payload.get("request_id") or "-"
+
+        if stage.endswith(".llm_api_call") and event == "complete":
+            tokens = payload.get("tokens") or {}
+            output = payload.get("output") or {}
+            text = str(output.get("text", "") or "")
+            reasoning = _extract_reasoning(text)
+            structured = _extract_structured_response(text)
+            model = payload.get("input", {}).get("model", "-")
+            provider = payload.get("input", {}).get("provider", "-")
+
+            lines = [
+                f"[{timestamp}] {stage} | {event} | request_id={request_id}",
+                f"provider={provider} model={model}",
+                (
+                    f"tokens: in={tokens.get('input_tokens', 0)} "
+                    f"out={tokens.get('output_tokens', 0)} "
+                    f"total={tokens.get('total_tokens', 0)}"
+                ),
+            ]
+            if reasoning:
+                lines.append("reasoning:")
+                lines.append(reasoning)
+            if structured is not None:
+                lines.append("response:")
+                lines.extend(_format_json_lines(structured, 1))
+            elif text:
+                lines.append("response:")
+                lines.append(text)
+            return "\n".join(lines)
+
+        if stage == "request" and event == "summary":
+            summary = payload.get("token_summary") or {}
+            final_state = payload.get("final_state") or {}
+            lines = [
+                f"[{timestamp}] request summary | request_id={request_id}",
+                (
+                    f"tokens: in={summary.get('input_tokens', 0)} "
+                    f"out={summary.get('output_tokens', 0)} "
+                    f"total={summary.get('total_tokens', 0)}"
+                ),
+            ]
+            if final_state:
+                lines.append(f"final_state: {final_state}")
+            return "\n".join(lines)
+
+        if event == "error":
+            error = payload.get("error", "")
+            return f"[{timestamp}] {stage} | error | request_id={request_id}\n{error}"
+
+        return (
+            f"[{timestamp}] {stage} | {event} | request_id={request_id} | "
+            f"tokens={payload.get('tokens', {})}"
+        )
+
+
 def _sanitize(value: Any, depth: int = 0, max_depth: int = 5) -> Any:
     if depth >= max_depth:
         return str(value)
@@ -96,7 +239,7 @@ def _workflow_logger() -> logging.Logger:
     formatter = logging.Formatter("%(message)s")
 
     console = logging.StreamHandler(sys.stdout)
-    console.setFormatter(formatter)
+    console.setFormatter(_WorkflowConsoleFormatter())
     logger.addHandler(console)
 
     file_handler = logging.FileHandler(_WORKFLOW_LOG_FILE, encoding="utf-8")

@@ -58,6 +58,7 @@ async def run_chat_pipeline(
 
     connection_data = _normalize_connection(connection)
 
+    sql_llm = get_llm(model_name="sqlcoder")
     trace = start_request_trace(
         {
             "user_query": user_query,
@@ -117,7 +118,9 @@ async def run_chat_pipeline(
     }
 
     llm = get_llm(model_name=model_name)
-
+    llm_sql = get_llm(
+        model_name="sqlcoder"
+    )  # FIX: use SQL-specific model for SQL nodes
     nodes_registry = {
         "query_refiner": trace_node(
             "query_refiner",
@@ -136,10 +139,14 @@ async def run_chat_pipeline(
             "intent_classifier",
             lambda s: intent_classifier_node(llm, s),
             input_builder=lambda s: {
+                "user_query": s.get("user_query"),
                 "refined_query": s.get("refined_query"),
+                "history": s.get("history"),
                 "domain_context": s.get("domain_context"),
             },
-            output_builder=lambda r: {"intent": r.get("intent")},
+            output_builder=lambda r: {
+                "intent": r.get("intent"),
+            },
         ),
         "query_decomposer": trace_node(
             "query_decomposer",
@@ -147,19 +154,25 @@ async def run_chat_pipeline(
             input_builder=lambda s: {
                 "refined_query": s.get("refined_query"),
                 "intent": s.get("intent"),
+                "construct": s.get("construct"),
             },
-            output_builder=lambda r: {"decomposed": r.get("decomposed")},
+            output_builder=lambda r: {
+                "decomposed": r.get("decomposed"),
+            },
         ),
         "views_fetcher": trace_node(
             "views_fetcher",
             lambda s: views_fetcher_node(llm, s),
             input_builder=lambda s: {
                 "construct": s.get("construct"),
+                "decomposed": s.get("decomposed"),  # FIX: needed for sub_queries
                 "history": s.get("history"),
+                "intent": s.get("intent"),
             },
             output_builder=lambda r: {
                 "views": r.get("views"),
                 "views_grade": r.get("views_grade"),
+                "view_suggestions": r.get("view_suggestions"),  # FIX: was missing
             },
         ),
         "schema_fetcher": trace_node(
@@ -167,6 +180,7 @@ async def run_chat_pipeline(
             lambda s: schema_fetcher_node(llm, s),
             input_builder=lambda s: {
                 "construct": s.get("construct"),
+                "decomposed": s.get("decomposed"),
                 "views_grade": s.get("views_grade"),
                 "views": s.get("views"),
             },
@@ -178,12 +192,13 @@ async def run_chat_pipeline(
         ),
         "sql_generator": trace_node(
             "sql_generator",
-            lambda s: sql_generator_node(llm, s),
+            lambda s: sql_generator_node(sql_llm, s),
             input_builder=lambda s: {
                 "construct": s.get("construct"),
                 "retrieved_schemas": s.get("retrieved_schemas"),
                 "seed_tables": s.get("seed_tables"),
                 "join_paths": s.get("join_paths"),
+                "views": s.get("views"),
                 "retry_feedback": s.get("retry_feedback"),
             },
             output_builder=lambda r: {
@@ -210,8 +225,22 @@ async def run_chat_pipeline(
         "executor": trace_node(
             "executor",
             executor_node,
-            input_builder=lambda s: {"generated_sql": s.get("generated_sql")},
-            output_builder=lambda r: {"execution_result": r.get("execution_result")},
+            input_builder=lambda s: {
+                "generated_sql": s.get("generated_sql"),
+                "db_type": s.get("db_type"),
+                "server": s.get("server"),
+                "database": s.get("database"),
+                "username": s.get("username"),
+                "password": s.get("password"),
+                "port": s.get("port"),
+                "pool_size": s.get("pool_size"),
+                "timeout": s.get("timeout"),
+            },
+            output_builder=lambda r: {
+                "execution_result": (
+                    r.get("execution_result") if isinstance(r, dict) else r
+                ),
+            },
         ),
         "sql_post_execution_validator": trace_node(
             "sql_post_execution_validator",
@@ -220,25 +249,37 @@ async def run_chat_pipeline(
                 "execution_result": s.get("execution_result"),
                 "generated_sql": s.get("generated_sql"),
                 "retrieved_schemas": s.get("retrieved_schemas"),
+                "construct": s.get("construct"),
             },
             output_builder=lambda r: {
                 "validation_passed": r.get("validation_passed"),
                 "validation_error": r.get("validation_error"),
+                "sql_errors": r.get("sql_errors"),
                 "self_rag_decision": r.get("self_rag_decision"),
+                "execution_analysis": r.get("execution_analysis"),
             },
         ),
+        # FIX: response_generator now receives all keys it needs
         "response_generator": trace_node(
             "response_generator",
             lambda s: response_generator_node(llm, s),
             input_builder=lambda s: {
                 "user_query": s.get("user_query"),
+                "history": s.get("history"),  # FIX: was missing
                 "intent": s.get("intent"),
+                "construct": s.get("construct"),  # FIX: was missing
                 "generated_sql": s.get("generated_sql"),
                 "execution_result": s.get("execution_result"),
                 "execution_analysis": s.get("execution_analysis"),
+                "retrieved_schemas": s.get("retrieved_schemas"),  # FIX: was missing
+                "view_suggestions": s.get("view_suggestions"),  # FIX: was missing
             },
             output_builder=lambda r: {
-                "user_facing_response": r.get("user_facing_response")
+                "user_facing_response": r.get("user_facing_response"),
+                "response_token_breakdown": r.get("response_token_breakdown"),
+                "view_suggestions_shown": r.get(
+                    "view_suggestions_shown"
+                ),  # FIX: was missing
             },
         ),
     }

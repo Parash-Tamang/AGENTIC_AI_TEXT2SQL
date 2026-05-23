@@ -7,7 +7,8 @@ Import build_graph() and call it once at startup.
 from __future__ import annotations
 
 from langgraph.graph import StateGraph, END
-from src.agent.state import RAGState
+from src.agent.nodes.state import RAGState
+from src.agent.llm.registry import get_llm
 
 # nodes
 from src.agent.nodes.query_refiner import query_refiner_node
@@ -18,13 +19,13 @@ from src.agent.nodes.schema_agent import schema_fetcher_node
 from src.agent.nodes.sql_generator import sql_generator_node
 from src.agent.nodes.sql_validator import sql_validator_node
 from src.agent.tools.executor import executor_node
-from src.agent.sub_agent.sql_results_validator_node import (
+from src.agent.nodes.sql_results_validator import (
     sql_post_execution_validator_node,
 )
-from src.agent.nodes.response import response_generator_node
+from src.agent.nodes.generate_response import response_generator_node
 
 # routers
-from src.agent.routers import (
+from src.agent.orchestrator.router import (
     intent_router,
     sql_validation_router,
     validation_router,
@@ -35,6 +36,7 @@ def build_graph(llm) -> StateGraph:
     """Compile and return the LangGraph StateGraph."""
 
     sg = StateGraph(RAGState)
+    sql_llm = get_llm(model_name="sqlcoder")
 
     # ── register nodes ────────────────────────────────────────────────────
     sg.add_node("query_refiner", lambda s: query_refiner_node(llm, s))
@@ -42,7 +44,7 @@ def build_graph(llm) -> StateGraph:
     sg.add_node("query_decomposer", lambda s: query_decomposer_node(llm, s))
     sg.add_node("views_fetcher", views_fetcher_node)
     sg.add_node("schema_fetcher", schema_fetcher_node)
-    sg.add_node("sql_generator", lambda s: sql_generator_node(llm, s))
+    sg.add_node("sql_generator", lambda s: sql_generator_node(sql_llm, s))
     sg.add_node("sql_validator", sql_validator_node)
     sg.add_node("executor", executor_node)
     sg.add_node(

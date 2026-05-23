@@ -14,6 +14,8 @@ from src.database.executor import (
 )
 from pydantic import BaseModel, Field
 from src.agent.tools.config import ConnectionConfig
+from src.agent.utils.pretty_print import pretty_log
+import pandas as pd
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Connection helper — reads from state, falls back to global singleton
@@ -61,6 +63,39 @@ def _get_or_load_graph(db_id: str) -> Any:
     return graph
 
 
+def _normalize_execution_result(result: Any) -> dict[str, Any]:
+    if isinstance(result, dict):
+        nested = result.get("execution_result")
+        if isinstance(nested, dict):
+            result = nested
+        if "rowcount" in result or "rows" in result or "error" in result:
+            rows = result.get("rows") or []
+            rowcount = result.get("rowcount")
+            if rowcount is None and isinstance(rows, list):
+                rowcount = len(rows)
+            normalized = dict(result)
+            normalized["rows"] = rows if isinstance(rows, list) else []
+            normalized["rowcount"] = int(rowcount or 0)
+            normalized.setdefault("error", None)
+            return normalized
+
+    if isinstance(result, pd.DataFrame) or hasattr(result, "shape"):
+        df = result if isinstance(result, pd.DataFrame) else pd.DataFrame(result)
+        return {
+            "type": "DataFrame",
+            "shape": list(df.shape),
+            "rows": df.head(50).to_dict(orient="records"),
+            "sample_rows": df.head(3).to_dict(orient="records"),
+            "rowcount": int(df.shape[0]),
+            "error": None,
+        }
+
+    if result is None:
+        return {"rows": [], "rowcount": 0, "error": None}
+
+    return {"rows": [], "rowcount": 0, "error": None, "raw": str(result)}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Pydantic result models
 # ─────────────────────────────────────────────────────────────────────────────
@@ -106,7 +141,7 @@ class ViewResult(BaseModel):
 def _handle_execute_query(inputs: dict, state: dict) -> dict:
     conn = _get_conn_from_state(state)
     print(f"   🔍 SQL: {inputs['sql'][:120]}...")
-    return _execute_query(
+    result = _execute_query(
         sql=inputs["sql"],
         db_type=conn.db_type,
         server=conn.server,
@@ -118,7 +153,33 @@ def _handle_execute_query(inputs: dict, state: dict) -> dict:
         timeout=conn.timeout,
         max_rows=inputs.get("max_rows", 100),
         expected_columns=inputs.get("expected_columns"),
-    )
+    )  # already a dict or DataFrame
+
+    try:
+        summary = _normalize_execution_result(result)
+
+        # Use summary for terminal prints and later state
+        rowcount = summary.get("rowcount")
+        error = summary.get("error")
+        sample = summary.get("sample_rows") or (summary.get("rows") or [])[:3]
+
+        print(f"   🔍 execution_result: rows={rowcount}, error={error}")
+        if sample:
+            print(f"      sample_rows: {sample}")
+        pretty_log(
+            "executor",
+            state={"generated_sql": inputs["sql"]},
+            llm_metrics={"token_breakdown": {}},
+            extra={"execution_result": summary},
+        )
+
+        # Replace result with normalized summary for downstream consumers
+        result = summary
+    except Exception as exc:
+        print(f"   🔍 execution_result: ERROR - {exc}")
+        result = {"rows": [], "rowcount": 0, "error": str(exc)}
+
+    return result
 
 
 def _handle_execute_view(inputs: dict, state: dict) -> dict:
@@ -414,11 +475,41 @@ def executor_node(state: dict) -> dict:
     logger.info(f"executor_node: executing SQL ({len(sql)} chars)")
 
     try:
-        result = dispatch("execute_query", {"sql": sql}, state=state)  # already a dict
-        print(f"   🔍 execution_result: {result}")
+        result = dispatch("execute_query", {"sql": sql}, state=state)
+        result = _normalize_execution_result(result)
+        # Print a concise terminal summary of the execution result
+        try:
+            rowcount = result.get("rowcount")
+            error = result.get("error")
+            sample_rows = result.get("rows") or result.get("sample_rows") or []
+            sample = sample_rows[:3] if isinstance(sample_rows, list) else []
+
+            print(f"   🔍 execution_result: rows={rowcount}, error={error}")
+            if sample:
+                print(f"      sample_rows: {sample}")
+            pretty_log(
+                "executor",
+                state={"generated_sql": sql},
+                llm_metrics={"token_breakdown": {}},
+                extra={"execution_result": result},
+            )
+        except Exception:
+            print(f"   🔍 execution_result: {result}")
     except Exception as exc:
         logger.error(f"executor_node: execution failed: {exc}")
         result = {"rows": [], "rowcount": 0, "error": str(exc)}
+
+        # Print error to terminal for visibility
+        try:
+            print(f"   ❌ execution_error: {result.get('error')}")
+            pretty_log(
+                "executor",
+                state={"generated_sql": sql},
+                llm_metrics={"token_breakdown": {}},
+                extra={"execution_result": result},
+            )
+        except Exception:
+            pass
 
     logger.info(
         f"executor_node: done — "

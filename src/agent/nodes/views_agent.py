@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 from src.agent.llm.base import BaseLLM
 from src.agent.llm.registry import get_llm
 from src.agent.tools.executor import dispatch
+from src.agent.utils.pretty_print import pretty_log
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -38,17 +39,17 @@ class ViewSuggestion(BaseModel):
     """A pre-defined view surfaced as a follow-up suggestion chip."""
 
     view_name: str
-    display_label: str  # human-readable chip label
-    description: str  # one-line explanation for the user
+    display_label: str
+    description: str
     source_queries: list[str] = Field(default_factory=list)
-    relevance_score: float = Field(default=0.0, ge=0.0, le=1.0)  # NEW: rank chips
-    suggestion_reason: str = ""  # NEW: why this view was suggested
+    relevance_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    suggestion_reason: str = ""
 
 
 class ViewsGrade(BaseModel):
-    """LLM grading result — mirrors query_refiner JSON contract."""
+    """LLM grading result."""
 
-    answer: str = "no"  # "yes" | "no"
+    answer: str = "no"
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     reasoning: str = ""
     relevant_views_count: int = 0
@@ -56,7 +57,6 @@ class ViewsGrade(BaseModel):
     structural_signals: list[str] = Field(default_factory=list)
     recommendations: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
-    # NEW: views that are related but didn't fully match the query
     related_views: list[str] = Field(default_factory=list)
 
 
@@ -193,12 +193,16 @@ def _get_all_queries(state: dict[str, Any]) -> list[str]:
     """
     candidates: list[str] = []
 
-    constructed = state.get("construct", {}).get("constructed_query", "")
+    # FIX: guard against construct being None
+    construct = state.get("construct") or {}
+    constructed = (
+        construct.get("constructed_query", "") if isinstance(construct, dict) else ""
+    )
     if constructed:
         candidates.append(constructed)
 
-    decomposed = state.get("decomposed", {})
-    if decomposed.get("is_composite"):
+    decomposed = state.get("decomposed") or {}
+    if isinstance(decomposed, dict) and decomposed.get("is_composite"):
         for sub_q in decomposed.get("sub_queries", []):
             q = (
                 sub_q.get("query", "")
@@ -213,16 +217,32 @@ def _get_all_queries(state: dict[str, Any]) -> list[str]:
 
 
 def _fetch_views_for_query(query: str, top_k: int) -> tuple[str, list[dict]]:
-    """Fetch views for one query via executor dispatch."""
+    """
+    Fetch views for one query via executor dispatch.
+    FIX: dispatch() returns a dict, not a JSON string — removed json.loads().
+    """
     try:
-        raw = dispatch("fetch_view", {"query": query, "top_k": top_k})
-        results = json.loads(raw)
-        if isinstance(results, dict) and "error" in results:
-            logger.warning(f"fetch_view error for '{query[:50]}': {results['error']}")
-            return query, []
+        results = dispatch("fetch_view", {"query": query, "top_k": top_k})
+
+        # dispatch returns a dict or list directly
         if isinstance(results, list):
             return query, results
+
+        if isinstance(results, dict):
+            if "error" in results:
+                logger.warning(
+                    f"fetch_view error for '{query[:50]}': {results['error']}"
+                )
+                return query, []
+            # some dispatch wrappers nest results under a key
+            nested = results.get("results") or results.get("views") or []
+            if isinstance(nested, list):
+                return query, nested
+            return query, []
+
+        logger.warning(f"fetch_view unexpected return type: {type(results)}")
         return query, []
+
     except Exception as exc:
         logger.error(f"Exception fetching views for '{query[:50]}': {exc}")
         return query, []
@@ -230,7 +250,12 @@ def _fetch_views_for_query(query: str, top_k: int) -> tuple[str, list[dict]]:
 
 def _is_follow_up(state: dict[str, Any]) -> bool:
     """Detect follow-up turn from state."""
-    classification = state.get("construct", {}).get("classification", "FRESH").upper()
+    construct = state.get("construct") or {}
+    classification = (
+        construct.get("classification", "FRESH").upper()
+        if isinstance(construct, dict)
+        else "FRESH"
+    )
     return classification in ("FOLLOW_UP", "REFINEMENT", "CONTINUATION")
 
 
@@ -240,15 +265,12 @@ def _should_generate_suggestions(
     is_follow_up: bool,
 ) -> bool:
     """
-    NEW: Decide whether to generate suggestion chips.
+    Decide whether to generate suggestion chips.
 
     Generate suggestions when ANY of these are true:
-      1. Follow-up turn with matching views (original behaviour).
-      2. Fresh query where views matched (grade.answer == "yes") — user
-         might want to refine via a pre-built view instead.
-      3. Fresh query where no views matched BUT related views were found
-         (grade.related_views is non-empty) — surface them as alternatives
-         so the user isn't left with nothing.
+      1. Follow-up turn with matching views.
+      2. Fresh query where views matched (grade.answer == "yes").
+      3. Fresh query where no views matched BUT related views were found.
 
     Never generate if there are literally no views fetched at all.
     """
@@ -258,7 +280,7 @@ def _should_generate_suggestions(
         return True
     if grade.answer == "yes":
         return True
-    if grade.related_views:  # no direct match but related views exist
+    if grade.related_views:
         return True
     return False
 
@@ -273,10 +295,7 @@ def _grade_views(
     constructed_query: str,
     views: list[dict],
 ) -> ViewsGrade:
-    """
-    Role 1 — structural understanding.
-    LLM grades views and extracts structural signals + related_views.
-    """
+    """Role 1 — structural understanding."""
     if not views:
         return ViewsGrade(
             answer="no",
@@ -296,8 +315,29 @@ def _grade_views(
     )
 
     try:
-        raw = llm.generate(system_prompt=_GRADER_SYSTEM, user_prompt=user_prompt)
-        data = _parse_llm_json(raw)
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "views_grade",
+                "schema": ViewsGrade.model_json_schema(),
+            },
+        }
+
+        raw = llm.generate(
+            system_prompt=_GRADER_SYSTEM,
+            user_prompt=user_prompt,
+            response_format=response_format,
+            json_mode=True,
+        )
+
+        if isinstance(raw, (dict, list)):
+            data = raw if isinstance(raw, dict) else raw[0]
+        else:
+            data = _parse_llm_json(raw)
+
+        # Guard: data must be a dict
+        if not isinstance(data, dict):
+            raise ValueError(f"Unexpected grader response type: {type(data)}")
 
         answer = data.get("answer", "no").lower()
         if answer not in ("yes", "no"):
@@ -309,9 +349,10 @@ def _grade_views(
             reasoning=data.get("reasoning", ""),
             relevant_views_count=int(data.get("relevant_views_count", 0)),
             total_views=len(views),
-            structural_signals=data.get("structural_signals", []),
-            recommendations=data.get("recommendations", []),
-            related_views=data.get("related_views", []),  # NEW
+            structural_signals=data.get("structural_signals") or [],
+            recommendations=data.get("recommendations") or [],
+            related_views=data.get("related_views") or [],
+            errors=data.get("errors") or [],
         )
 
     except Exception as exc:
@@ -328,34 +369,27 @@ def _generate_suggestions(
     constructed_query: str,
     views: list[dict],
     query_map: dict[str, list[str]],
-    related_view_names: list[str],  # NEW param
+    related_view_names: list[str],
 ) -> list[ViewSuggestion]:
-    """
-    Role 3 — follow-up suggestion chips.
-
-    Now includes both direct matches AND related views so the user always
-    gets something useful to pick even when no view directly matched.
-    """
+    """Role 3 — follow-up suggestion chips."""
     if not views:
         return []
 
     retrieved_names = {name for names in query_map.values() for name in names}
 
-    # Direct matches: appeared in query_map
     direct_views = [
         v for v in views if (v.get("view_name") or v.get("name", "")) in retrieved_names
     ]
-
-    # Related views: flagged by grader but not a direct match
     related_views = [
         v
         for v in views
-        if (v.get("view_name") or v.get("name", "")) in related_view_names
+        if (v.get("view_name") or v.get("name", "")) in (related_view_names or [])
         and (v.get("view_name") or v.get("name", "")) not in retrieved_names
     ]
 
     candidate_views = direct_views + related_views
     if not candidate_views:
+        logger.info("No candidate views for suggestions (direct or related)")
         return []
 
     views_text = "\n".join(
@@ -372,27 +406,62 @@ def _generate_suggestions(
     )
 
     try:
-        raw = llm.generate(system_prompt=_SUGGESTION_SYSTEM, user_prompt=user_prompt)
-        data = _parse_llm_json(raw)
+        wrapper_schema = {
+            "type": "object",
+            "properties": {
+                "suggestions": {
+                    "type": "array",
+                    "items": ViewSuggestion.model_json_schema(),
+                }
+            },
+            "required": ["suggestions"],
+        }
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {"name": "view_suggestions", "schema": wrapper_schema},
+        }
+
+        raw = llm.generate(
+            system_prompt=_SUGGESTION_SYSTEM,
+            user_prompt=user_prompt,
+            response_format=response_format,
+            json_mode=True,
+        )
+
+        if isinstance(raw, (dict, list)):
+            data = raw if isinstance(raw, dict) else (raw[0] if raw else {})
+        else:
+            data = _parse_llm_json(raw)
+
+        if not isinstance(data, dict):
+            raise ValueError(f"Unexpected suggestion response type: {type(data)}")
 
         suggestions = []
-        for s in data.get("suggestions", []):
+        for s in data.get("suggestions") or []:
+            if not isinstance(s, dict):
+                continue
             sources = [
                 q for q, names in query_map.items() if s.get("view_name") in names
             ]
-            suggestions.append(
-                ViewSuggestion(
-                    view_name=s.get("view_name", ""),
-                    display_label=s.get("display_label", ""),
-                    description=s.get("description", ""),
-                    source_queries=sources,
-                    relevance_score=float(s.get("relevance_score", 0.0)),
-                    suggestion_reason=s.get("suggestion_reason", "related_alternative"),
+            try:
+                suggestions.append(
+                    ViewSuggestion(
+                        view_name=s.get("view_name", ""),
+                        display_label=s.get("display_label", ""),
+                        description=s.get("description", ""),
+                        source_queries=sources,
+                        relevance_score=float(s.get("relevance_score", 0.0)),
+                        suggestion_reason=s.get(
+                            "suggestion_reason", "related_alternative"
+                        ),
+                    )
                 )
-            )
+            except Exception as parse_exc:
+                logger.warning(f"Skipping malformed suggestion: {parse_exc}")
+                continue
 
-        # Sort by relevance_score descending so direct matches appear first
         suggestions.sort(key=lambda s: s.relevance_score, reverse=True)
+        logger.info(f"Generated {len(suggestions)} suggestion chips")
         return suggestions
 
     except Exception as exc:
@@ -414,21 +483,10 @@ def views_fetcher_node(
     """
     LangGraph node: fetch views + grade + generate suggestions.
 
-    Roles performed:
-      1. Structural understanding — grader extracts query-shape signals from views.
-      2. Context enrichment — view documents flow into state["views"] for sql_generator.
-      3. Follow-up suggestions — ALWAYS generated when any views (direct or related)
-         are found, not just on follow-up turns. Chips are written to
-         state["view_suggestions"] with suggestion_reason so the UI can differentiate
-         "use this view" vs "you might also want this".
-
     State keys written:
         state["views"]            : {views, unique_count, query_map, errors}
-        state["views_grade"]      : ViewsGrade dict (answer, confidence,
-                                    structural_signals, related_views, …)
-        state["view_suggestions"] : list[ViewSuggestion dicts] — sorted by
-                                    relevance_score, may be empty only if
-                                    truly no views were fetched at all.
+        state["views_grade"]      : ViewsGrade dict
+        state["view_suggestions"] : list[ViewSuggestion dicts]
     """
     logger.info("Views agent starting")
 
@@ -449,11 +507,15 @@ def views_fetcher_node(
                 "view_suggestions": [],
             }
 
-    constructed_query = state.get("construct", {}).get("constructed_query", "")
+    # FIX: guard construct being None
+    construct = state.get("construct") or {}
+    constructed_query = (
+        construct.get("constructed_query", "") if isinstance(construct, dict) else ""
+    )
     queries = _get_all_queries(state)
 
     if not queries:
-        logger.error("No queries in state")
+        logger.error("No queries in state — views agent returning empty")
         grade = ViewsGrade(
             answer="no", reasoning="No queries in state", errors=["No queries"]
         )
@@ -470,7 +532,7 @@ def views_fetcher_node(
         }
 
     # ── Parallel fetch ────────────────────────────────────────────────────────
-    workers = max_workers or len(queries)
+    workers = max_workers or min(len(queries), 4)
     logger.info(f"Fetching views for {len(queries)} queries with {workers} workers")
 
     views_result = ViewsResult()
@@ -482,6 +544,9 @@ def views_fetcher_node(
             query = futures[future]
             try:
                 _, results = future.result()
+                logger.debug(
+                    f"  fetch_view returned {len(results)} items for '{query[:50]}'"
+                )
                 for view in results:
                     views_result.add_view(query, view)
             except Exception as exc:
@@ -500,7 +565,7 @@ def views_fetcher_node(
         f"related={grade.related_views})"
     )
 
-    # ── Role 3: suggestions — now always generated when views exist ───────────
+    # ── Role 3: suggestions ───────────────────────────────────────────────────
     is_follow_up = _is_follow_up(state)
     suggestions: list[ViewSuggestion] = []
 
@@ -520,11 +585,27 @@ def views_fetcher_node(
             constructed_query,
             views_data["views"],
             views_data["query_map"],
-            grade.related_views,  # pass related views to suggestion generator
+            grade.related_views,
         )
-        logger.info(f"Generated {len(suggestions)} suggestion chips")
     else:
-        logger.info("No views available for suggestions — skipping chip generation")
+        logger.info(
+            f"Skipping suggestion generation — views={views_data['unique_count']}, "
+            f"grade={grade.answer}, related={grade.related_views}"
+        )
+
+    pretty_log(
+        "ViewsFetcher",
+        state={
+            "user_query": state.get("user_query"),
+            "constructed_query": constructed_query,
+        },
+        llm_metrics={"token_breakdown": {}, "latency_ms": None},
+        extra={
+            "views_count": views_data.get("unique_count", 0),
+            "grade": grade.answer,
+            "suggestions": [s.view_name for s in suggestions],
+        },
+    )
 
     return {
         **state,

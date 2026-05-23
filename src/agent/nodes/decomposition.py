@@ -6,6 +6,7 @@ from typing import Any, List, Optional
 from pydantic import BaseModel, Field
 
 from src.agent.llm.base import BaseLLM
+from src.agent.utils.pretty_print import pretty_log
 
 # ─────────────────────────────────────────────────────────────────────────────
 # System Prompt for Query Decomposition
@@ -270,41 +271,73 @@ def query_decomposer(
         ensure_ascii=False,
     )
 
-    raw = llm.generate(system_prompt=prompt, user_prompt=user_prompt)
+    # Request structured JSON output using DecompositionResult pydantic schema
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "decomposition_result",
+            "schema": DecompositionResult.model_json_schema(),
+        },
+    }
 
-    # Strip markdown fences if model wraps output in ```json ... ```
-    cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("```")[1]
-        if cleaned.startswith("json"):
-            cleaned = cleaned[4:]
-        cleaned = cleaned.strip()
+    raw = llm.generate(
+        system_prompt=prompt,
+        user_prompt=user_prompt,
+        response_format=response_format,
+        json_mode=True,
+    )
 
     try:
-        data = json.loads(cleaned)
+        if isinstance(raw, (dict, list)):
+            data = raw
+        else:
+            cleaned = str(raw).strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("```")[1]
+                if cleaned.startswith("json"):
+                    cleaned = cleaned[4:]
+                cleaned = cleaned.strip()
+            data = json.loads(cleaned)
 
-        # Parse sub-queries
-        sub_queries_data = data.get("SubQueries", [])
+        # Support both TitleCase keys (IsComposite/SubQueries) and snake_case
+        is_composite = (
+            data.get("is_composite")
+            if data.get("is_composite") is not None
+            else data.get("IsComposite", False)
+        )
+        sub_queries_data = (
+            data.get("sub_queries")
+            if data.get("sub_queries") is not None
+            else data.get("SubQueries", [])
+        )
+
         sub_queries = [
             SubQuery(
                 order=sq.get("order", idx + 1),
-                query=sq.get("query", ""),
+                query=sq.get("query") or sq.get("question") or "",
                 reasoning=sq.get("reasoning", ""),
             )
             for idx, sq in enumerate(sub_queries_data)
         ]
 
         result = DecompositionResult(
-            is_composite=data.get("IsComposite", False),
-            sub_queries=sub_queries,
+            is_composite=bool(is_composite), sub_queries=sub_queries
         )
-    except (json.JSONDecodeError, ValueError, KeyError):
-        result = DecompositionResult(
-            is_composite=False,
-            sub_queries=[],
-        )
+    except Exception:
+        result = DecompositionResult(is_composite=False, sub_queries=[])
 
     state["decomposed"] = result.model_dump()
+    # Pretty print concise decomposition summary
+    pretty_log(
+        "Decomposer",
+        state={"constructed_query": constructed_query},
+        llm_metrics={"token_breakdown": {}, "latency_ms": None},
+        extra={
+            "is_composite": result.is_composite,
+            "sub_queries": [s.order for s in result.sub_queries],
+        },
+    )
+
     return state
 
 

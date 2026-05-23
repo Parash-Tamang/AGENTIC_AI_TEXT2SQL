@@ -48,12 +48,14 @@ logging.basicConfig(
 try:
 
     schema = execute_query(
-        sql="""SELECT TOP 10 T1.Name, COUNT(T3.SalesOrderID) AS PurchaseCount
-FROM SalesLT.Customer T1
-INNER JOIN SalesLT.SalesOrderHeader T2 ON T1.CustomerID = T2.CustomerID
-INNER JOIN SalesLT.SalesOrderDetail T3 ON T2.SalesOrderID = T3.SalesOrderID
-GROUP BY T1.Name
-ORDER BY PurchaseCount DESC
+        sql="""SELECT 
+    EmailAddress,
+    DIFFERENCE(EmailAddress, 'erin1@adventure-') AS match_score
+FROM SalesLT.Customer
+WHERE 
+    DIFFERENCE(EmailAddress, 'erin1@adventure-') >= 3
+    OR EmailAddress LIKE '%erin1@adventure-%'
+ORDER BY match_score DESC
 """,
         db_type="mssql",
         server="(localdb)\\MSSQLLocalDB",

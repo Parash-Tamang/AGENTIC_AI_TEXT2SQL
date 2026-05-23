@@ -4,7 +4,7 @@ This document describes the architecture, components, data flow, and extensibili
 
 ## Overview
 
-The `sub_agent` folder implements a small LangGraph-style RAG pipeline focused on Text‑to‑SQL generation and post‑execution validation. It separates deterministic, schema-driven checks from fuzzy, LLM-based semantic checks and includes a deterministic Self‑RAG decision layer to decide whether to regenerate SQL.
+The `src/agent/nodes` package implements a LangGraph-style Text-to-SQL pipeline. It keeps deterministic checks outside the LLM, uses LLMs only where semantic judgment is needed, and passes all data through a shared `state` dictionary.
 
 Key goals:
 - Keep deterministic checks (syntax, schema, aggregation, execution analysis) outside the LLM.
@@ -12,52 +12,59 @@ Key goals:
 - Persist append-only JSONL logs for traceability.
 - Expose small, testable "node" functions that accept and return a shared `state` dict.
 
-## Current Architecture
+## Agent I/O Map
 
-This section reflects the current workflow in the repository. The legacy notes below are kept for context only.
-
-### Node Graph
-
-| Order | Node | File | Reads | Writes | Role |
+| Order | Agent | File | Inputs | Outputs | State keys used |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Query Refiner | `src/agent/nodes/query_refiner.py` | `user_query`, `history`, `retry_feedback` | `construct`, `refined_query` | Refines the user request and switches to `RETRY` when validator feedback exists. |
-| 2 | Query Decomposer | `src/agent/nodes/decomposition.py` | `refined_query`, `domain_context` | `decomposed` | Splits composite requests into ordered sub-queries. |
-| 3 | Intent Classifier | `src/agent/nodes/intent_classifier.py` | `refined_query`, `domain_context` | `intent` | Routes the request to SQL generation or narrative response flow. |
-| 4 | Views Fetcher | `src/agent/nodes/views_agent.py` | `construct`, `decomposed` | `views`, `views_grade`, `view_suggestions` | Retrieves views, grades structural coverage, and emits follow-up chips. |
-| 5 | Schema Fetcher | `src/agent/nodes/schema_agent.py` | `construct`, `decomposed`, `views_grade` | `schemas`, `retrieved_schemas`, `seed_tables`, `join_paths`, `schema_coverage`, `schema_coverage_history` | Fetches schemas, runs BFS join discovery, and validates schema sufficiency with retry fetches. |
-| 6 | SQL Generator | SQL generator node/module | `refined_query`, `retrieved_schemas`, `seed_tables`, `join_paths`, `views` | `generated_sql`, `token_count`, `token_breakdown` | Builds SQL from the final schema context. |
-| 7 | SQL Validator | SQL validator node/module | `generated_sql`, `retrieved_schemas`, `join_paths` | `validation_result`, `validation_passed`, `hallucinated_tables` | Deterministic SQL correctness checks. |
-| 8 | Results Validator / Self-RAG | SQL results validator node/module | `generated_sql`, execution output, `validation_result` | `execution_analysis`, `validation_with_llm`, `self_rag_decision`, `execution_issues` | Decides whether to retry generation after execution. |
-| 9 | Response Generator | response node/module | validated SQL/result state | `user_facing_response` | Formats the final answer for the user. |
+| 1 | Query Refiner | `src/agent/nodes/query_refiner.py` | `user_query`, `history`, optional `retry_feedback` | `construct`, `refined_query` | Reads: `user_query`, `history`, `retry_feedback`.<br>Writes: `construct`, `refined_query`. |
+| 2 | Query Decomposer | `src/agent/nodes/decomposition.py` | `refined_query`, `domain_context` | `decomposed` | Reads: `refined_query`, `domain_context`.<br>Writes: `decomposed`. |
+| 3 | Intent Classifier | `src/agent/nodes/intent_classifier.py` | `refined_query`, `domain_context` | `intent` | Reads: `refined_query`, `domain_context`.<br>Writes: `intent`. |
+| 4 | Views Fetcher | `src/agent/nodes/views_agent.py` | `construct`, `decomposed` | `views`, `views_grade`, `view_suggestions` | Reads: `construct`, `decomposed`.<br>Writes: `views`, `views_grade`, `view_suggestions`. |
+| 5 | Schema Fetcher | `src/agent/nodes/schema_agent.py` | `construct`, `decomposed`, `views_grade` | `schemas`, `retrieved_schemas`, `seed_tables`, `join_paths`, `schema_coverage`, `schema_coverage_history` | Reads: `construct`, `decomposed`, `views_grade`.<br>Writes: `schemas`, `retrieved_schemas`, `seed_tables`, `join_paths`, `schema_coverage`, `schema_coverage_history`. |
+| 6 | SQL Generator | `src/agent/nodes/sql_generator.py` | `refined_query`, `retrieved_schemas`, `seed_tables`, `join_paths`, `views` | `generated_sql`, `token_count`, `token_breakdown`, `sql_errors` | Reads: `refined_query`, `retrieved_schemas`, `seed_tables`, `join_paths`, `views`.<br>Writes: `generated_sql`, `token_count`, `token_breakdown`, `sql_errors`. |
+| 7 | SQL Validator | `src/agent/nodes/sql_validator.py` | `generated_sql`, `retrieved_schemas`, `join_paths`, optional `execution_result` | `validation_result`, `validation_passed`, `validation_errors`, `hallucinated_tables`, `suggested_fix`, `validation_structural` | Reads: `generated_sql`, `retrieved_schemas`, `join_paths`, optional `execution_result`.<br>Writes: `validation_result`, `validation_passed`, `validation_errors`, `hallucinated_tables`, `suggested_fix`, `validation_structural`. |
+| 8 | Post-Execution Validator / Self-RAG | `src/agent/nodes/sql_results_validator.py` | `user_query`, `generated_sql`, `retrieved_schemas`, `join_paths`, `views`, `execution_result`, optional `validation_structural`, `retry_feedback` | `execution_analysis`, `validation_with_llm`, `self_rag_decision`, `validation_token_breakdown`, `validation_error`, `execution_issues` | Reads: `user_query`, `generated_sql`, `retrieved_schemas`, `join_paths`, `views`, `execution_result`, optional `validation_structural`, `retry_feedback`.<br>Writes: `execution_analysis`, `validation_with_llm`, `self_rag_decision`, `validation_token_breakdown`, `validation_error`, `execution_issues`. |
+| 9 | Response Generator | `src/agent/nodes/generate_response.py` | `user_query`, `history`, `execution_result`, `view_suggestions`, validation context | `user_facing_response`, `response_token_breakdown`, `response_error` | Reads: `user_query`, `history`, `execution_result`, `view_suggestions`, validation context.<br>Writes: `user_facing_response`, `response_token_breakdown`, `response_error`. |
 
-### State Data Map
+## Shared State Map
 
-| State Key | Type | Produced By | Consumed By | Purpose |
+The pipeline uses a single state object. The most important keys are:
+
+| State key | Type | Produced by | Consumed by | Purpose |
 | --- | --- | --- | --- | --- |
-| `user_query` | `str` | caller | refiner | Raw user input. |
-| `history` | `list[dict]` | caller | refiner | Prior chat context. |
-| `retry_feedback` | `dict` / `RetryFeedback` | validator/orchestrator | refiner | Triggers query reconstruction with retry context. |
-| `construct` | `dict` | refiner | decomposer, intent, schema agent | Refined query and classification. |
-| `refined_query` | `str` | refiner | decomposer, intent, schema/sql generators | Stable query text passed downstream. |
-| `decomposed` | `dict` | decomposer | schema agent, views agent | Composite query breakdown. |
-| `intent` | `dict` | intent classifier | router, response nodes | Routing and output format. |
-| `views` | `dict` | views agent | schema agent, SQL generator | Retrieved view documents. |
-| `views_grade` | `dict` | views agent | schema agent | Structural signals for schema seeding. |
-| `view_suggestions` | `list[dict]` | views agent | UI / follow-up handlers | Suggested follow-up views. |
-| `schemas` | `dict` | schema agent | SQL generator / diagnostics | Serialized schema fetch state. |
-| `retrieved_schemas` | `list[dict]` | schema agent | SQL generator | Final schema documents for SQL writing. |
-| `seed_tables` | `list[str]` | schema agent | SQL generator | Primary tables chosen for the query. |
-| `join_paths` | `list` | schema agent | SQL generator | Join relationships discovered by BFS. |
-| `schema_coverage` | `dict` | schema agent | diagnostics / SQL generator | Latest sufficiency validation result. |
-| `schema_coverage_history` | `list[dict]` | schema agent | diagnostics | Full retry history from the validator loop. |
-| `generated_sql` | `str` | SQL generator | validators / executor | SQL text to run against the database. |
-| `execution_result` | `dict` | executor / post-execution validator | response generator / results validator | Raw rows, rowcount, and execution error from the DB run. |
-| `validation_result` | `dict` | SQL validator | results validator / retry logic | Static SQL validation output. |
-| `validation_errors` | `list[str]` | SQL validator | orchestrator / retry logic | Human-readable validation issues. |
-| `suggested_fix` | `str` | SQL validator | query refiner / orchestrator | Concrete SQL rewrite hint when retry is needed. |
-| `execution_analysis` | `dict` | results validator | orchestrator | Deterministic row-level analysis. |
-| `self_rag_decision` | `dict` | results validator | orchestrator | Final retry/no-retry decision. |
-| `user_facing_response` | `str` | response generator | caller/UI | Final natural language answer. |
+| `user_query` | `str` | caller | refiner, results validator, response generator | Raw user request. |
+| `history` | `list[dict]` | caller | refiner, response generator | Conversation history. |
+| `retry_feedback` | `dict` / `RetryFeedback` | validator or orchestrator | refiner, results validator | Retry context for rebuilding the query after a failure. |
+| `construct` | `dict` / `ConstructData` | refiner | decomposer, intent classifier, views agent, schema agent | Refined query and classification payload. |
+| `refined_query` | `str` | refiner | decomposer, intent classifier, views agent, schema agent, SQL generator | Stable query text passed downstream. |
+| `decomposed` | `dict` / `DecomposedData` | decomposer | views agent, schema agent | Composite query breakdown into sub-queries. |
+| `intent` | `dict` / `IntentData` | intent classifier | router, response generator | Routing decision and output format. |
+| `views` | `dict` / `ViewsData` | views agent | schema agent, SQL generator, response generator | Retrieved view documents. |
+| `views_grade` | `dict` / `ViewsGrade` | views agent | schema agent, response generator | Structural coverage score for views. |
+| `view_suggestions` | `list[dict]` | views agent | response generator, UI | Suggested follow-up views or chips. |
+| `schemas` | `dict` / `SchemasData` | schema agent | diagnostics, generator | Full schema retrieval payload. |
+| `retrieved_schemas` | `list[dict]` | schema agent | SQL generator, validators, results validator | Final schema documents used for SQL generation. |
+| `seed_tables` | `list[str]` | schema agent | SQL generator | Primary tables selected for the query. |
+| `join_paths` | `list` | schema agent | SQL generator, validators, results validator | Join relationships discovered by BFS. |
+| `schema_coverage` | `dict` | schema agent | diagnostics, generator | Latest schema sufficiency result. |
+| `schema_coverage_history` | `list[dict]` | schema agent | diagnostics | Retry history for schema sufficiency checks. |
+| `generated_sql` | `str` | SQL generator | validators, executor, results validator | Final SQL to run. |
+| `sql_errors` | `list[str]` | SQL generator | orchestrator | Generation-time SQL errors. |
+| `validation_structural` | `dict` / `StructuralValidation` | SQL validator | results validator | Pre-execution structural validation snapshot. |
+| `validation_result` | `dict` | SQL validator | orchestrator, results validator | Full static validation output. |
+| `validation_passed` | `bool` | SQL validator | orchestrator | Quick pass/fail flag for static validation. |
+| `validation_errors` | `list[str]` | SQL validator | orchestrator, refiner | Human-readable validation issues. |
+| `hallucinated_tables` | `list[str]` | SQL validator | orchestrator, refiner | Tables referenced in SQL but not found in schema. |
+| `suggested_fix` | `str` | SQL validator | refiner, orchestrator | Concrete rewrite hint for retries. |
+| `execution_result` | `dict` / `RawExecutionResult` | executor, results validator | validators, response generator | Rows, rowcount, and execution errors. |
+| `execution_analysis` | `dict` / `ExecutionAnalysis` | results validator | orchestrator | Deterministic row-level analysis. |
+| `validation_with_llm` | `dict` / `SemanticValidation` | results validator | orchestrator | LLM semantic check of the executed rows. |
+| `self_rag_decision` | `dict` / `SelfRAGDecision` | results validator | orchestrator, refiner | Final retry/no-retry decision. |
+| `validation_token_breakdown` | `dict` / `TokenBreakdown` | results validator | logs, diagnostics | Token usage for validation. |
+| `execution_issues` | `list[str]` | results validator | orchestrator, refiner | Issues that can trigger a retry. |
+| `user_facing_response` | `str` | response generator | caller/UI | Final natural-language answer. |
+| `response_token_breakdown` | `dict` | response generator | logs | Token usage for the response step. |
+| `response_error` | `str` | response generator | logs, caller | Response-generation error message. |
 
 ### Executor Contract
 

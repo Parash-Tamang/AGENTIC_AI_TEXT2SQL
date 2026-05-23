@@ -5,6 +5,7 @@ import re
 from typing import Any, Optional
 from pydantic import BaseModel
 from src.agent.llm.base import BaseLLM
+from src.agent.utils.pretty_print import pretty_log
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
@@ -198,27 +199,42 @@ class IntentClassifier:
             },
             ensure_ascii=False,
         )
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "intent_classifier",
+                "schema": IntentClassifierOutput.model_json_schema(),
+            },
+        }
+
         return self.llm.generate(
             system_prompt=self.system_prompt,
             user_prompt=user_prompt,
+            response_format=response_format,
+            json_mode=True,
         )
 
     # ── private: parse ───────────────────────────────────────────────────────
 
     def _parse(self, raw: str) -> IntentClassifierOutput:
-        cleaned = raw.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.split("```")[1]
-            if cleaned.startswith("json"):
-                cleaned = cleaned[4:]
-            cleaned = cleaned.strip()
-
         try:
-            data = json.loads(cleaned)
-            intent = data.get("Intent", "SQL_QUERY")
-            confidence = float(data.get("Confidence", 0.0))
-            output_format = data.get("OutputFormat") or None
-            graph_type = data.get("GraphType") or None
+            if isinstance(raw, (dict, list)):
+                data = raw
+            else:
+                cleaned = str(raw).strip()
+                if cleaned.startswith("```"):
+                    cleaned = cleaned.split("```")[1]
+                    if cleaned.startswith("json"):
+                        cleaned = cleaned[4:]
+                    cleaned = cleaned.strip()
+                data = json.loads(cleaned)
+
+            intent = data.get("intent") or data.get("Intent") or "SQL_QUERY"
+            confidence = float(data.get("confidence") or data.get("Confidence") or 0.0)
+            output_format = (
+                data.get("output_format") or data.get("OutputFormat") or None
+            )
+            graph_type = data.get("graph_type") or data.get("GraphType") or None
 
             # enforce nulls for non SQL_QUERY
             if intent != "SQL_QUERY":
@@ -243,10 +259,10 @@ class IntentClassifier:
                 confidence=confidence,
                 output_format=output_format,
                 graph_type=graph_type,
-                reasoning=data.get("Reasoning", ""),
+                reasoning=data.get("reasoning") or data.get("Reasoning") or "",
             )
 
-        except (json.JSONDecodeError, ValueError, KeyError):
+        except Exception:
             return IntentClassifierOutput(
                 intent="SQL_QUERY",
                 route_to="QueryTranslation",
@@ -333,6 +349,17 @@ def intent_classifier_node(llm: BaseLLM, state: dict[str, Any]) -> dict[str, Any
     )
 
     state["intent"] = output.model_dump()
+    # Pretty print concise intent summary
+    try:
+        pretty_log(
+            "IntentClassifier",
+            state={"refined_query": state.get("refined_query")},
+            llm_metrics={"token_breakdown": {}, "latency_ms": None},
+            extra={"intent": output.intent, "confidence": output.confidence},
+        )
+    except Exception:
+        pass
+
     return state
 
 

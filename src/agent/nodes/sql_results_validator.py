@@ -66,6 +66,7 @@ LOG_DIR = Path(__file__).resolve().parent / "logs"
 SQL_VALIDATION_LOG = LOG_DIR / "sql_post_execution_validation.jsonl"
 from src.agent.nodes.state import get_fetched_views
 from src.agent.llm.base import BaseLLM
+from src.agent.utils.pretty_print import pretty_log
 
 # ---------------------------------------------------------------------------
 # Token counting - graceful fallback when tiktoken is unavailable
@@ -391,7 +392,9 @@ def decide_self_rag_retry(
     struct_issues = _collect_structural_issues(structural) if structural else []
     sem_issues = _collect_semantic_issues(semantic) if semantic else []
     exec_issues = (
-        _collect_execution_issues(execution_analysis) if execution_analysis else []
+        _collect_execution_issues(execution_analysis)
+        if execution_analysis is not None
+        else []
     )
 
     all_issues = struct_issues + sem_issues + exec_issues
@@ -424,6 +427,14 @@ def decide_self_rag_retry(
             trigger_retry = semantic_conf >= confidence_threshold
 
     if "semantic_invalid" in all_issues and semantic_conf >= confidence_threshold:
+        trigger_retry = True
+
+    # Force retry when execution produced an error or zero rows — these
+    # conditions usually indicate the SQL should be regenerated. Previously
+    # empty_result/execution_error could be considered non-fatal when the
+    # semantic confidence was low; in practice we prefer to retry the
+    # generator to attempt a different SQL.
+    if any(k in exec_issues for k in ("execution_error", "empty_result")):
         trigger_retry = True
 
     # low-confidence semantic only -> do not force retry
@@ -522,7 +533,9 @@ def sql_post_execution_validator_node(
 
     # ── Read execution_result from state (written by executor_node) ───
 
-    raw_exec = state.get("execution_result") or {}
+    raw_exec = state.get("execution_result")
+    if raw_exec is None:
+        raw_exec = {}
     execution_result = RawExecutionResult(
         rows=raw_exec.get("rows", []),
         rowcount=raw_exec.get("rowcount"),
@@ -569,27 +582,43 @@ def sql_post_execution_validator_node(
     prompt_tokens = _count_tokens(_SYSTEM_PROMPT + user_prompt)
 
     try:
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "semantic_validation",
+                "schema": SemanticValidation.model_json_schema(),
+            },
+        }
+
         raw_llm_output = llm.generate(
             system_prompt=_SYSTEM_PROMPT,
             user_prompt=user_prompt,
+            response_format=response_format,
+            json_mode=True,
         )
     except Exception as exc:
         logger.error("LLM validation call failed: %s", exc)
         return {**state, "validation_error": str(exc)}
-
-    completion_tokens = _count_tokens(raw_llm_output)
-
-    try:
-        parsed_llm = _parse_llm_json(raw_llm_output)
-    except Exception as exc:
-        logger.error("Failed to parse LLM validation JSON: %s", exc)
-        parsed_llm = {
-            "valid": False,
-            "score": 0.0,
-            "issues": ["invalid_llm_json"],
-            "reasoning": str(exc),
-            "retry": False,
-        }
+    # Compute completion tokens (serialize if dict)
+    if isinstance(raw_llm_output, (dict, list)):
+        serialized = json.dumps(raw_llm_output, ensure_ascii=False)
+        completion_tokens = _count_tokens(serialized)
+        parsed_llm = (
+            raw_llm_output if isinstance(raw_llm_output, dict) else raw_llm_output[0]
+        )
+    else:
+        completion_tokens = _count_tokens(str(raw_llm_output))
+        try:
+            parsed_llm = _parse_llm_json(raw_llm_output)
+        except Exception as exc:
+            logger.error("Failed to parse LLM validation JSON: %s", exc)
+            parsed_llm = {
+                "valid": False,
+                "score": 0.0,
+                "issues": ["invalid_llm_json"],
+                "reasoning": str(exc),
+                "retry": False,
+            }
 
     semantic = SemanticValidation(
         valid=bool(parsed_llm.get("valid")),
@@ -629,6 +658,20 @@ def sql_post_execution_validator_node(
     )
 
     # ── Step 5: Write back to state dict ─────────────────────────────
+    # Pretty print a concise terminal summary
+    pretty_log(
+        "SQLResultsValidator",
+        state={
+            "user_query": pipeline_state.user_query,
+            "generated_sql": pipeline_state.generated_sql,
+        },
+        llm_metrics={
+            "token_breakdown": token_breakdown.model_dump(),
+            "latency_ms": None,
+        },
+        extra={"decision": decision.model_dump()},
+    )
+
     return {
         **state,
         "execution_analysis": exec_analysis.model_dump(),

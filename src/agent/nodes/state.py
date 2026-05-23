@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from typing import Any, List, Dict, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Input/Intermediate Models
@@ -69,7 +69,7 @@ class ViewInfo(BaseModel):
     name: Optional[str] = None
     view_name: Optional[str] = None
     description: Optional[str] = None
-    schema: Optional[str] = None
+    schema_name: Optional[str] = Field(default=None, alias="schema")
     source_queries: List[str] = Field(default_factory=list)
 
 
@@ -133,7 +133,7 @@ class RAGState(BaseModel):
 
     # ── INTERMEDIATE FIELDS ───────────────────────────────────────────────────
     # Produced by sub-agents
-    construct: Optional[ConstructData] = None
+    construct_data: Optional[ConstructData] = Field(default=None, alias="construct")
     decomposed: Optional[DecomposedData] = None
     intent: Optional[IntentData] = None
     views: Optional[ViewsData] = None
@@ -184,10 +184,7 @@ class RAGState(BaseModel):
     response_token_breakdown: Dict[str, Any] = Field(default_factory=dict)
     response_error: Optional[str] = None
 
-    class Config:
-        """Allow arbitrary types for LangGraph compatibility."""
-
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -206,7 +203,9 @@ def _normalize_connection(connection: Optional[Any]) -> dict[str, Any]:
         try:
             parsed = json.loads(connection)
         except json.JSONDecodeError as exc:
-            raise TypeError("connection must be a mapping or JSON object string") from exc
+            raise TypeError(
+                "connection must be a mapping or JSON object string"
+            ) from exc
         if isinstance(parsed, dict):
             return parsed
     raise TypeError(f"Unsupported connection type: {type(connection).__name__}")
@@ -234,7 +233,7 @@ def create_initial_state(
         password=connection_data.get("password"),
         port=connection_data.get("port"),
     )
-    return state.model_dump()
+    return state.model_dump(by_alias=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

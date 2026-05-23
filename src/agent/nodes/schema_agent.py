@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field
 from src.agent.llm.base import BaseLLM
 from src.agent.llm.registry import get_llm
 from src.agent.tools.executor import dispatch, SchemaResult
+from src.agent.utils.pretty_print import pretty_log
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -41,7 +42,7 @@ logger.setLevel(logging.DEBUG)
 # ─────────────────────────────────────────────────────────────────────────────
 
 MAX_WORKERS = 1  # SQLite: no concurrent writes; bump for Postgres
-DEFAULT_TOP_K = 15  # schemas per semantic query
+DEFAULT_TOP_K = 5  # schemas per semantic query
 MAX_BFS_HOPS = 2  # depth 2 covers most real queries; 3+ adds noise
 MAX_BFS_FILTER_DEPTH = 3  # agent can request depth-3 on retry
 MAX_SCHEMA_SUFFICIENCY_RETRIES = 3
@@ -265,11 +266,25 @@ def _run_schema_sufficiency_check(
     )
 
     try:
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "schema_coverage",
+                "schema": SchemaCoverageResult.model_json_schema(),
+            },
+        }
+
         raw = llm.generate(
             system_prompt=_SCHEMA_SUFFICIENCY_SYSTEM,
             user_prompt=user_prompt,
+            response_format=response_format,
+            json_mode=True,
         )
-        data = _parse_llm_json(raw)
+
+        if isinstance(raw, (dict, list)):
+            data = raw if isinstance(raw, dict) else raw[0]
+        else:
+            data = _parse_llm_json(raw)
         missing = [
             str(t).strip() for t in data.get("missing_tables", []) if str(t).strip()
         ]
@@ -384,8 +399,27 @@ def _run_seed_filter(
     )
 
     try:
-        raw = llm.generate(system_prompt=_SEED_FILTER_SYSTEM, user_prompt=user_prompt)
-        data = _parse_llm_json(raw)
+        # Request structured JSON output using the SeedFilterResult pydantic model
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "seed_filter_result",
+                "schema": SeedFilterResult.model_json_schema(),
+            },
+        }
+
+        raw = llm.generate(
+            system_prompt=_SEED_FILTER_SYSTEM,
+            user_prompt=user_prompt,
+            response_format=response_format,
+            json_mode=True,
+        )
+
+        # llm.generate may return a dict when json_mode=True; handle both cases
+        if isinstance(raw, (dict, list)):
+            data = raw
+        else:
+            data = _parse_llm_json(raw)
 
         seed_tables = [
             t
@@ -668,6 +702,21 @@ def schema_fetcher_node(
     logger.info(
         f"Schema agent complete: {schemas_state.unique_count} schemas, "
         f"{len(seed_tables)} seeds, {len(join_paths)} join paths"
+    )
+
+    # Pretty print concise summary
+    pretty_log(
+        "SchemaFetcher",
+        state={
+            "user_query": user_query_for_validation,
+            "constructed_query": constructed_query,
+        },
+        llm_metrics={"token_breakdown": {}, "latency_ms": None},
+        extra={
+            "schemas": schemas_state.unique_count,
+            "seeds": seed_tables,
+            "join_paths": len(join_paths),
+        },
     )
 
     return {

@@ -11,6 +11,11 @@ import sqlglot.expressions as exp
 from pydantic import BaseModel, Field
 
 from src.agent.llm.base import BaseLLM
+from src.agent.utils.pretty_print import pretty_log
+from src.agent.nodes.sql_results_validator import (
+    _format_schemas_for_llm,
+    _format_join_paths_for_llm,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +124,18 @@ IMPORTANT — DO NOT flag these as issues:
   - Only set retry=true when there is at least one CRITICAL issue that would
     cause wrong results or a runtime failure.
 
+Valid T-SQL functions include but are not limited to:
+  - DIFFERENCE(), SOUNDEX()         -- phonetic matching
+  - CHARINDEX(), PATINDEX()         -- string search  
+  - ISNULL(), COALESCE()            -- null handling
+  - DATEPART(), DATEDIFF(), EOMONTH() -- date functions
+  - TOP N, OFFSET/FETCH             -- pagination
+  - STRING_AGG(), STUFF()           -- string aggregation
+  - TRY_CAST(), TRY_CONVERT()       -- safe casting
+
+Do NOT flag any of the above as errors or warnings — they are standard T-SQL.
+Only flag functions that do not exist in SQL Server at all.
+    
 Return ONLY a single JSON object, no prose, no markdown:
 {
   "valid": true|false,
@@ -200,12 +217,46 @@ def _collect_cte_names(tree) -> set[str]:
     """
     cte_names: set[str] = set()
     for cte in tree.find_all(exp.CTE):
-        alias = cte.args.get("alias")
+        alias = getattr(cte, "alias", None)
+        if alias is None:
+            alias = getattr(cte, "alias_or_name", None)
         if alias:
             name = getattr(alias, "name", None) or str(alias)
             if name:
                 cte_names.add(name.lower())
     return cte_names
+
+
+def _resolve_table_key(node: exp.Table, schemas: list[dict]) -> str:
+    db = getattr(node, "db", None) or getattr(node, "catalog", None)
+    name = getattr(node, "name", None)
+    if not name:
+        return ""
+
+    if db:
+        return f"{db}.{name}".lower()
+
+    for s in schemas:
+        schema_name = s.get("schema_name", "")
+        table_name = s.get("table_name", "")
+        if table_name and table_name.lower() == name.lower():
+            return (
+                f"{schema_name}.{table_name}".lower()
+                if schema_name
+                else table_name.lower()
+            )
+
+    return name.lower()
+
+
+def _query_table_refs(tree, schemas: list[dict]) -> set[str]:
+    refs: set[str] = set()
+    for node in tree.find_all(exp.Table):
+        name = node.name
+        if not name:
+            continue
+        refs.add(_resolve_table_key(node, schemas))
+    return {ref for ref in refs if ref}
 
 
 def _has_aggregates(tree) -> bool:
@@ -267,13 +318,8 @@ def validate_sql_structure(
             continue
         if name.lower() in cte_names:  # FIX: CTEs are not real tables
             continue
-        schema = node.args.get("schema")
-        db = node.args.get("db")
-        key = (
-            f"{schema}.{name}".lower()
-            if schema and not db
-            else f"{db}.{name}".lower() if db else name.lower()
-        )
+        schema = getattr(node, "db", None) or getattr(node, "catalog", None)
+        key = f"{schema}.{name}".lower() if schema else name.lower()
         found_tables.add(key)
 
     missing_tables = [t for t in found_tables if t not in schema_map]
@@ -282,10 +328,21 @@ def validate_sql_structure(
         result.needs_retry = True
 
     # 3. Column existence (skip SELECT aliases)
+    # 3. Column existence (skip SELECT aliases and string literals)
     missing_columns: list[dict[str, str]] = []
+    query_tables = _query_table_refs(tree, schemas)
     for col in tree.find_all(exp.Column):
+        # FIX: skip string literals misidentified as columns by sqlglot
+        name_node = getattr(col, "this", None)
+        if getattr(name_node, "is_string", False) or isinstance(name_node, str):
+            continue
+
         tbl = (col.table or "").lower()
         col_name = col.name.lower()
+
+        # Belt-and-suspenders: also catch quote-prefixed names that slipped through
+        if col_name.startswith("'") or col_name.startswith('"'):
+            continue
 
         if col_name in select_aliases:  # FIX: computed aliases are valid
             continue
@@ -296,8 +353,10 @@ def validate_sql_structure(
             if col_name not in schema_map[tbl]:
                 missing_columns.append({"table": tbl, "column": col_name})
         elif not tbl:
-            all_cols = set().union(*schema_map.values()) if schema_map else set()
-            if col_name not in all_cols and col_name not in select_aliases:
+            candidate_tables = query_tables or set(schema_map.keys())
+            if not any(
+                col_name in schema_map.get(table, set()) for table in candidate_tables
+            ):
                 missing_columns.append({"table": "", "column": col_name})
 
     if missing_columns:
@@ -408,13 +467,28 @@ def validate_sql_with_llm(
     )
 
     try:
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "sql_validation",
+                "schema": SemanticValidationResult.model_json_schema(),
+            },
+        }
+
         raw = llm.generate(
             system_prompt=SQL_VALIDATION_SYSTEM,
             user_prompt=payload,
+            response_format=response_format,
+            json_mode=True,
         )
-        if not raw or not raw.strip():
+
+        if not raw:
             raise ValueError("Empty LLM response")
-        parsed = json.loads(_extract_json(raw))
+
+        if isinstance(raw, (dict, list)):
+            parsed = raw if isinstance(raw, dict) else raw[0]
+        else:
+            parsed = json.loads(_extract_json(raw))
     except Exception as exc:
         logger.warning(f"LLM validator error: {exc}")
         return SemanticValidationResult(
@@ -525,15 +599,11 @@ def sql_validator_node(
     if not isinstance(join_paths, list):
         join_paths = []
 
+    # Format contexts for LLM using shared helpers
     try:
-        from src.agent.nodes.generate_response import (
-            _format_schemas_for_llm,
-            _format_join_paths_for_llm,
-        )
-
         schemas_context = _format_schemas_for_llm(schemas)
         join_paths_context = _format_join_paths_for_llm(join_paths)
-    except ImportError:
+    except Exception:
         schemas_context = json.dumps(schemas, ensure_ascii=False, default=str)
         join_paths_context = json.dumps(join_paths, ensure_ascii=False, default=str)
 
@@ -618,6 +688,14 @@ def sql_validator_node(
             "semantic": semantic.model_dump(),
             "output": output.model_dump(),
         }
+    )
+
+    # Pretty print concise terminal summary for debugging
+    pretty_log(
+        "SQLValidator",
+        state={"user_query": user_query, "generated_sql": sql},
+        llm_metrics=None,
+        extra={"needs_retry": needs_retry, "issues": all_issues, "score": output.score},
     )
 
     return final_state

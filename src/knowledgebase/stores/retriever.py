@@ -72,7 +72,7 @@ def _run_retrieval(
         embedding = embedder.embed(query)
         threshold = base_threshold
 
-        while threshold <= max_threshold + 1e-9:
+        while threshold <= max_threshold + 0.2:
             if len(chunks) >= max_results:
                 break
 

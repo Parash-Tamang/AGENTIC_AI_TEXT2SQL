@@ -55,6 +55,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from src.agent.llm.base import BaseLLM
 from src.agent.prompt.refiner import REFINER_SYSTEM
+from src.agent.utils.pretty_print import pretty_log
 
 logger = logging.getLogger(__name__)
 
@@ -298,14 +299,24 @@ def query_refiner(
         user_query[:80],
     )
 
-    # LLM call
+    # LLM call — request structured JSON following the RefineResult pydantic model
     try:
-        raw_output: str = llm.generate(
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "refine_result",
+                "schema": RefineResult.model_json_schema(),
+            },
+        }
+
+        raw_output = llm.generate(
             system_prompt=prompt,
             user_prompt=user_prompt,
             memory=history,
+            response_format=response_format,
+            json_mode=True,
         )
-        print(raw_output)
+
     except Exception as exc:
         logger.error("query_refiner: LLM call failed: %s", exc)
         # Safe fallback — treat as FRESH pass-through
@@ -319,8 +330,40 @@ def query_refiner(
         state["refined_query"] = result.constructed_query
         return state
 
-    # Parse response
-    result: RefineResult = _parse_llm_response(raw_output, fallback_query=user_query)
+    # Parse response: accept dict/list returned when json_mode=True, or JSON string
+    try:
+        if isinstance(raw_output, (dict, list)):
+            data = raw_output
+        else:
+            data = json.loads(_strip_markdown_fences(str(raw_output)))
+
+        # Normalize keys to support both snake_case or TitleCase from different models
+        classification = (
+            data.get("classification") or data.get("Classification") or "FRESH"
+        )
+        confidence = float(data.get("confidence") or data.get("Confidence") or 0.0)
+        constructed = (
+            data.get("constructed_query") or data.get("ConstructedQuery") or user_query
+        )
+        reasoning = data.get("reasoning") or data.get("Reasoning") or ""
+
+        result = RefineResult(
+            classification=classification,
+            confidence=confidence,
+            constructed_query=constructed,
+            reasoning=reasoning,
+        )
+
+    except Exception as exc:
+        logger.warning(
+            "query_refiner: structured parse failed (%s) — using fallback.", exc
+        )
+        result = RefineResult(
+            classification="FRESH",
+            confidence=0.0,
+            constructed_query=user_query,
+            reasoning="Structured parse failed — passing query through as-is.",
+        )
 
     # If retry_feedback was present but LLM somehow returned FRESH/CONTINUE,
     # override classification to RETRY to ensure downstream consistency.
@@ -346,5 +389,22 @@ def query_refiner(
     # next fresh request on the same state object.
     if feedback is not None:
         state["retry_feedback"] = None
+
+    # Pretty print concise refiner summary
+    try:
+        pretty_log(
+            "QueryRefiner",
+            state={
+                "user_query": user_query,
+                "refined_query": state.get("refined_query"),
+            },
+            llm_metrics={"token_breakdown": {}, "latency_ms": None},
+            extra={
+                "classification": result.classification,
+                "confidence": result.confidence,
+            },
+        )
+    except Exception:
+        pass
 
     return state
