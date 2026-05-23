@@ -1,4 +1,5 @@
 MODELS = {
+    # Groq models
     "openai/gpt-oss-20b": {
         "provider": "groq",
         "max_tokens": 8192,
@@ -9,8 +10,24 @@ MODELS = {
     },
     "meta-llama/llama-4-scout-17b-16e-instruct": {
         "provider": "groq",
-        "max_tokens": 20000,
+        "max_tokens": 30000,
     },
-    # add more later
-    # "llama-70b": {"provider": "groq"},
+    # Ollama models
+    "gemma:2b": {"provider": "ollama", "max_tokens": 15000},
+    "qwen2.5:3b": {
+        "provider": "ollama",
+        "max_tokens": 30000,
+    },
+    "llama3.1:8b": {
+        "provider": "ollama",
+        "max_tokens": 50000,
+    },
+    "gemma3:1b": {
+        "provider": "ollama",
+        "max_tokens": 30000,
+    },
+    "sqlcoder": {
+        "provider": "ollama",
+        "max_tokens": 30000,
+    },
 }

@@ -1,7 +1,8 @@
 from pydantic import BaseModel
+from typing import Any, Optional
 
 
 class ApiResult(BaseModel):
     success: bool
     message: str
-    data: None
+    data: Optional[Any] = None

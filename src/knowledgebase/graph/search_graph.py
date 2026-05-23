@@ -15,6 +15,7 @@ def bfs_schema_with_joins(
     log.info(f"BFS started — seeds: {seed_tables}, max_hops: {max_hops}")
 
     visited = _bfs_tables(graph, seed_tables, max_hops)
+    # print(f"Visited tables: {visited}")
     if not visited:
         return {"tables": [], "schema": [], "joins": [], "token_estimate": 0}
 

@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional
 
+
 @dataclass
 class ConnectionConfig:
     db_type: str
@@ -9,14 +10,17 @@ class ConnectionConfig:
     username: Optional[str]
     password: Optional[str]
     port: Optional[int] = None
-    pool_size: Optional[int] = None
-    timeout: Optional[int] = None
+    pool_size: int = 5
+    timeout: int = 30
+
 
 _config: Optional[ConnectionConfig] = None
+
 
 def set_connection_config(config: ConnectionConfig):
     global _config
     _config = config
+
 
 def get_connection_config() -> ConnectionConfig:
     global _config
@@ -28,10 +32,11 @@ def get_connection_config() -> ConnectionConfig:
             username="sa",
             password="1234567890",
             port=None,
-            pool_size=None,
-            timeout=1,
+            pool_size=5,
+            timeout=30,
         )
     return _config
+
 
 def reset_connection_config():
     global _config

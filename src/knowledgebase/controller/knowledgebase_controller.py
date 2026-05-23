@@ -41,6 +41,10 @@ from src.knowledgebase.config.graph_setting import (
     DEFAULT_GRAPH_SETTINGS,
     graph_manager,
 )
+from src.knowledgebase.config.schema_setting import (
+    SchemaSettings,
+    DEFAULT_Schema_SETTINGS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -601,9 +605,10 @@ def create_graph(database_name: str) -> ApiResponse[GraphResponse]:
     try:
         # Get schema snapshot path
         schema_file = os.path.join(
-            SchemaService.get_persist_directory(),
-            f"{database_name}_schema_snapshot.json",
+            DEFAULT_Schema_SETTINGS.persist_directory,
+            f"{database_name}_schema.json",
         )
+        print(schema_file)
         if not os.path.exists(schema_file):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,

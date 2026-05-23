@@ -100,16 +100,23 @@ class TableModel(BaseModel):
         return "\n".join(lines)
 
     def to_metadata(self) -> dict[str, Any]:
-        columns_metadata = [
-            [col.name, col.type, col.normalized_constraint.value, col.relation]
-            for col in self.columns
-        ]
         return {
             "database_name": self.database_name,
             "schema_name": self.schema_name,
             "table_name": self.table_name,
             "type": SchemaType.TABLE,
-            "columns": json.dumps(columns_metadata),
+            "table_description": self.table_description,
+            "columns": [
+                {
+                    "name": col.name,
+                    "type": col.type,
+                    "constraint": col.normalized_constraint.value,
+                    "relation": col.relation,
+                    "description": col.description,
+                    "sample_values": col.sample_values,
+                }
+                for col in self.columns
+            ],
         }
 
 
@@ -151,6 +158,16 @@ class ViewModel(BaseModel):
             "schema_name": self.schema_name,
             "view_name": self.view_name,
             "type": SchemaType.VIEW,
+            "view_description": self.view_description,
+            "columns": [
+                {
+                    "name": col.name,
+                    "type": col.type,
+                    "description": col.description,
+                }
+                for col in self.columns
+            ],
+            "view_definition": self.view_definition,
         }
 
 
