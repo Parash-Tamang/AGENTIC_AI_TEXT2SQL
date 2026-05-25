@@ -5,6 +5,7 @@ Fixes applied:
   1. sqlglot-based table ref extraction (no alias.column false positives)
   2. Column-level hallucination detection (new)
   3. Retry loop with forbidden-table AND forbidden-column injection on hallucination
+  4. Optional SQLCoder refiner — pass sqlcoder_llm=None to disable completely
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import sqlglot
 import sqlglot.expressions as exp
@@ -24,6 +25,7 @@ from pydantic import BaseModel, Field
 from src.agent.llm.base import BaseLLM
 from src.agent.utils.pretty_print import pretty_log
 from src.agent.nodes.schema_agent import schema_fetcher_node
+from src.agent.nodes.sql_refiner import refine_sql  # ← NEW
 from src.knowledgebase.stores.indexer import Indexer, SchemaType
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -183,12 +185,12 @@ Fix any failures before outputting.
 ══════════════════════════════════════════════════════════════════
 OUTPUT — YOUR ENTIRE RESPONSE MUST BE A SINGLE JSON OBJECT
 ══════════════════════════════════════════════════════════════════
-• No text before the JSON
-• No text after the JSON
-• No markdown fences (no ```)
-• No explanations outside the JSON fields
-• First character of your response: {
-• Last character of your response: }
+- No text before the JSON
+- No text after the JSON
+- No markdown fences (no ```)
+- No explanations outside the JSON fields
+- First character of your response: {
+- Last character of your response: }
 
 {
     "sql": "SELECT ...",
@@ -350,11 +352,6 @@ def _format_join_paths_for_llm(join_paths: list[dict | str]) -> str:
 
 
 def _extract_table_refs_from_sql(sql: str) -> set[str]:
-    """
-    Use sqlglot to extract real table references from SQL.
-    Falls back to a FROM/JOIN-anchored regex if sqlglot fails.
-    Returns lowercased schema.table or bare table strings.
-    """
     try:
         tree = sqlglot.parse_one(sql, dialect="tsql")
         refs: set[str] = set()
@@ -372,7 +369,6 @@ def _extract_table_refs_from_sql(sql: str) -> set[str]:
 
 
 def _known_table_refs(schemas: list[dict]) -> set[str]:
-    """Lowercased set of schema.table and bare table names from retrieved schemas."""
     known: set[str] = set()
     for s in schemas:
         sn = s.get("schema_name", "")
@@ -385,10 +381,6 @@ def _known_table_refs(schemas: list[dict]) -> set[str]:
 
 
 def _detect_hallucinated_tables(sql: str, schemas: list[dict]) -> list[str]:
-    """
-    Return table references in SQL not present in retrieved schemas.
-    Uses sqlglot for accurate extraction — no alias.column false positives.
-    """
     known = _known_table_refs(schemas)
     found = _extract_table_refs_from_sql(sql)
     return sorted(found - known)
@@ -400,26 +392,14 @@ def _detect_hallucinated_tables(sql: str, schemas: list[dict]) -> list[str]:
 
 
 def _known_column_refs(schemas: list[dict]) -> dict[str, set[str]]:
-    """
-    Build a map of lowercased schema.table → set of lowercased column names.
-    Parses column names from the 'document' string if structured 'columns' list
-    is absent (since schemas use the document format).
-
-    Document lines look like:
-      "  - ColumnName (TYPE) [constraints] | Info: ..."
-    """
     known: dict[str, set[str]] = {}
-
     for s in schemas:
         sn = s.get("schema_name", "")
         tn = s.get("table_name", "")
         if not (sn and tn):
             continue
-
         key = f"{sn}.{tn}".lower()
         cols: set[str] = set()
-
-        # Try structured columns list first
         for col in s.get("columns", []):
             if isinstance(col, dict):
                 name = col.get("name", "").strip()
@@ -427,20 +407,15 @@ def _known_column_refs(schemas: list[dict]) -> dict[str, set[str]]:
                     cols.add(name.lower())
             elif isinstance(col, str):
                 cols.add(col.strip().lower())
-
-        # Fall back to parsing the document string (actual format in use)
         if not cols:
             document = s.get("document", "")
             for line in document.splitlines():
                 stripped = line.strip()
                 if stripped.startswith("- "):
-                    # First token after "- " is the column name
                     col_name = stripped[2:].split()[0].lower()
                     if col_name:
                         cols.add(col_name)
-
         known[key] = cols
-
     return known
 
 
@@ -449,10 +424,8 @@ def _resolve_table_key(node: exp.Table, schemas: list[dict]) -> str:
     name = node.name
     if not name:
         return ""
-
     if db:
         return f"{db}.{name}".lower()
-
     for s in schemas:
         schema_name = s.get("schema_name", "")
         table_name = s.get("table_name", "")
@@ -462,7 +435,6 @@ def _resolve_table_key(node: exp.Table, schemas: list[dict]) -> str:
                 if schema_name
                 else table_name.lower()
             )
-
     return name.lower()
 
 
@@ -480,15 +452,6 @@ def _extract_query_table_refs(sql: str, schemas: list[dict]) -> set[str]:
 def _extract_column_refs_from_sql(
     sql: str, schemas: list[dict]
 ) -> list[tuple[str, str]]:
-    """
-    Use sqlglot to extract (resolved_table_key, column_name) pairs from SQL.
-
-    - resolved_table_key is the lowercased schema.table string, or
-      "__unqualified__" when the column has no table prefix.
-    - Wildcards (*) are skipped.
-    - String literals misidentified as columns by sqlglot are skipped.
-    - Aliases are resolved to their underlying schema.table.
-    """
     bare_to_full: dict[str, str] = {}
     for s in schemas:
         sn = s.get("schema_name", "")
@@ -525,8 +488,6 @@ def _extract_column_refs_from_sql(
             if not col_name or col_name == "*":
                 continue
 
-            # FIX: skip string literals misidentified as columns by sqlglot
-            # e.g. DIFFERENCE(col, 'Erin') yields a Column node with name="'erin'"
             name_node = node.args.get("this")
             if isinstance(name_node, exp.Literal):
                 continue
@@ -555,16 +516,8 @@ def _extract_column_refs_from_sql(
 
 
 def _detect_hallucinated_columns(sql: str, schemas: list[dict]) -> list[str]:
-    """
-    Return column references in SQL that don't exist in the resolved table's
-    schema entry.  Format of each returned string: "schema.table.column".
-
-    For unqualified columns the format is "(unqualified).column" and they are
-    flagged only when the column name is absent from ALL known tables.
-    """
     known_cols = _known_column_refs(schemas)
     query_tables = _extract_query_table_refs(sql, schemas)
-
     col_refs = _extract_column_refs_from_sql(sql, schemas)
     hallucinated: list[str] = []
 
@@ -604,10 +557,6 @@ def _inject_correction(
     hallucinated_tables: list[str],
     hallucinated_columns: list[str],
 ) -> str:
-    """
-    Re-inject the user prompt with an explicit correction block listing every
-    hallucinated table AND column that must not appear in the next attempt.
-    """
     parsed = json.loads(user_prompt_json)
     issues: list[str] = []
 
@@ -655,6 +604,7 @@ def _append_sql_generation_log(entry: dict[str, Any]) -> None:
 def sql_generator_node(
     llm: BaseLLM,
     state: dict[str, Any],
+    sqlcoder_llm: Optional[BaseLLM] = None,  # ← NEW: None = refiner disabled
 ) -> dict[str, Any]:
     """
     LangGraph node: generate SQL from constructed query + schemas + join paths.
@@ -672,8 +622,16 @@ def sql_generator_node(
         state["sql_errors"]           — list[str]
         state["hallucinated_tables"]  — list[str]
         state["hallucinated_columns"] — list[str]
+
+    Optional:
+        sqlcoder_llm — pass an OllamaLLM(model="sqlcoder") to enable
+                       SQLCoder-based refinement on hallucination detection.
+                       Pass None (default) to disable — zero pipeline impact.
     """
     logger.info("Starting SQL Generator")
+    logger.info(
+        f"SQLCoder refiner: {'ENABLED' if sqlcoder_llm else 'DISABLED'}"
+    )  # ← NEW
 
     def _fail(reason: str, exc: str = "") -> dict[str, Any]:
         errors = [reason] + ([exc] if exc else [])
@@ -828,10 +786,9 @@ def sql_generator_node(
                 return _fail("LLM returned empty sql field after all retries")
             continue
 
-        # ── hallucination detection (tables + columns) ────────────────────────
+        # ── hallucination detection ───────────────────────────────────────────
         hallucinated_tables = _detect_hallucinated_tables(sql, schemas)
         hallucinated_cols = _detect_hallucinated_columns(sql, schemas)
-        # Normalize and deduplicate detector output
         try:
             hallucinated_cols = sorted({c.lower() for c in (hallucinated_cols or [])})
         except Exception:
@@ -853,12 +810,45 @@ def sql_generator_node(
                 f"Attempt {attempt + 1}: hallucinated columns: {hallucinated_cols}"
             )
 
+        # ── NEW: SQLCoder refiner (first-line fix before Llama retry) ─────────
+        refined_sql, was_refined = refine_sql(
+            sql=sql,
+            schemas=schemas,
+            sqlcoder_llm=sqlcoder_llm,  # None = no-op
+            hallucinated_tables=hallucinated_tables,
+            hallucinated_cols=hallucinated_cols,
+        )
+
+        if was_refined:
+            # Re-validate SQLCoder output
+            r_tables = _detect_hallucinated_tables(refined_sql, schemas)
+            r_cols = _detect_hallucinated_columns(refined_sql, schemas)
+            r_cols = sorted({c.lower() for c in (r_cols or [])})
+
+            if not r_tables and not r_cols:
+                logger.info(
+                    "✅ SQLCoder fixed all hallucinations — skipping Llama retry"
+                )
+                sql = refined_sql
+                hallucinated_tables = []
+                hallucinated_cols = []
+                break
+            else:
+                logger.warning(
+                    f"SQLCoder could not fully fix — remaining tables={r_tables}, cols={r_cols}"
+                )
+                # Use SQLCoder's output as base for Llama retry (it may be partially better)
+                hallucinated_tables = r_tables
+                hallucinated_cols = r_cols
+        # ── END SQLCoder block ────────────────────────────────────────────────
+
         if attempt < MAX_RETRIES:
-            # Inject both table and column corrections into next prompt
             user_prompt = _inject_correction(
                 user_prompt, hallucinated_tables, hallucinated_cols
             )
-            logger.info("Correction block injected (tables + columns). Retrying...")
+            logger.info(
+                "Correction block injected (tables + columns). Retrying Llama..."
+            )
         else:
             error_parts: list[str] = []
             if hallucinated_tables:
@@ -913,7 +903,6 @@ def sql_generator_node(
         }
     )
 
-    # Pretty print concise SQL generation summary
     try:
         pretty_log(
             "SQLGenerator",
@@ -925,6 +914,7 @@ def sql_generator_node(
             extra={
                 "hallucinated_tables": hallucinated_tables,
                 "hallucinated_columns": hallucinated_cols,
+                "sqlcoder_refiner": "enabled" if sqlcoder_llm else "disabled",  # ← NEW
             },
         )
     except Exception:
@@ -935,98 +925,53 @@ def sql_generator_node(
     return final_state
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Workflow helper
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def run_schema_and_sql_workflow(
-    llm: BaseLLM,
-    user_query: str,
-    domain_context: str = "general",
-) -> dict[str, Any]:
-    """schema_fetcher_node → sql_generator_node end-to-end."""
-    logger.info(f"Workflow: {user_query[:60]}...")
-
-    schema_file = (
-        Path(__file__).parent.parent.parent
-        / "assets"
-        / "schema"
-        / "AdventureWorksLT2019_schema.json"
-    )
-    if schema_file.exists():
-        try:
-            count = Indexer().index_json_from_file(
-                schema_type=SchemaType.TABLE, json_path=str(schema_file)
-            )
-            logger.info(f"Indexed {count} tables")
-        except Exception as exc:
-            logger.warning(f"Indexing failed: {exc}")
-
-    state: dict[str, Any] = {
-        "user_query": user_query,
-        "domain_context": domain_context,
-        "construct": {
-            "constructed_query": user_query,
-            "reasoning": "Direct user query for SQL generation",
-        },
-    }
-
-    logger.info("Step 1: Schema Fetcher")
-    state = schema_fetcher_node(state, top_k=5, run_bfs=True)
-    logger.info(f"  seed_tables={state.get('seed_tables', [])}")
-    logger.info(f"  join_paths={len(state.get('join_paths', []))}")
-
-    logger.info("Step 2: SQL Generator")
-    state = sql_generator_node(llm, state)
-    logger.info(f"  sql={state.get('generated_sql', '')[:80]}...")
-    logger.info(f"  hallucinated_tables={state.get('hallucinated_tables', [])}")
-    logger.info(f"  hallucinated_columns={state.get('hallucinated_columns', [])}")
-
-    return state
-
-
 # # ─────────────────────────────────────────────────────────────────────────────
-# # Entrypoint
+# # Workflow helper
 # # ─────────────────────────────────────────────────────────────────────────────
 
-# if __name__ == "__main__":
-#     logging.basicConfig(
-#         level=logging.INFO,
-#         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+
+# def run_schema_and_sql_workflow(
+#     llm: BaseLLM,
+#     user_query: str,
+#     domain_context: str = "general",
+#     sqlcoder_llm: Optional[BaseLLM] = None,  # ← NEW: pass through to node
+# ) -> dict[str, Any]:
+#     """schema_fetcher_node → sql_generator_node end-to-end."""
+#     logger.info(f"Workflow: {user_query[:60]}...")
+
+#     schema_file = (
+#         Path(__file__).parent.parent.parent
+#         / "assets"
+#         / "schema"
+#         / "AdventureWorksLT2019_schema.json"
 #     )
+#     if schema_file.exists():
+#         try:
+#             count = Indexer().index_json_from_file(
+#                 schema_type=SchemaType.TABLE, json_path=str(schema_file)
+#             )
+#             logger.info(f"Indexed {count} tables")
+#         except Exception as exc:
+#             logger.warning(f"Indexing failed: {exc}")
 
-#     from src.agent.llm.registry import get_llm
+#     state: dict[str, Any] = {
+#         "user_query": user_query,
+#         "domain_context": domain_context,
+#         "construct": {
+#             "constructed_query": user_query,
+#             "reasoning": "Direct user query for SQL generation",
+#         },
+#     }
 
-#     try:
-#         model = "meta-llama/llama-4-scout-17b-16e-instruct"
-#         llm = get_llm(model_name=model)
-#     except Exception as exc:
-#         logger.error(f"Failed to initialize LLM: {exc}")
-#         exit(1)
+#     logger.info("Step 1: Schema Fetcher")
+#     state = schema_fetcher_node(state, top_k=5, run_bfs=True)
+#     logger.info(f"  seed_tables={state.get('seed_tables', [])}")
+#     logger.info(f"  join_paths={len(state.get('join_paths', []))}")
 
-#     user_query = (
-#         "create me a SQL query to find the top 10 best-selling products in the last 3 years, "
-#         "including their category and subcategory, total quantity sold, total revenue generated, "
-#         "average selling price, number of distinct customers who bought them, and the best sales "
-#         "territory for each product. Use the saleslt schema."
-#     )
+#     logger.info("Step 2: SQL Generator")
+#     state = sql_generator_node(llm, state, sqlcoder_llm=sqlcoder_llm)  # ← NEW
+#     logger.info(f"  sql={state.get('generated_sql', '')[:80]}...")
+#     logger.info(f"  hallucinated_tables={state.get('hallucinated_tables', [])}")
+#     logger.info(f"  hallucinated_columns={state.get('hallucinated_columns', [])}")
 
-#     final_state = run_schema_and_sql_workflow(
-#         llm=llm, user_query=user_query, domain_context="retail / ecommerce"
-#     )
-
-#     print(f"\n{'='*70}\nUSER QUERY\n{'='*70}\n{user_query}")
-#     print(
-#         f"\n{'='*70}\nGENERATED SQL\n{'='*70}\n{final_state.get('generated_sql', '')}"
-#     )
-#     print(f"\n{'='*70}\nSEED TABLES\n{'='*70}\n{final_state.get('seed_tables', [])}")
-#     print(f"\n{'='*70}\nHALLUCINATED TABLES\n{'='*70}")
-#     print(json.dumps(final_state.get("hallucinated_tables", []), indent=2))
-#     print(f"\n{'='*70}\nHALLUCINATED COLUMNS\n{'='*70}")
-#     print(json.dumps(final_state.get("hallucinated_columns", []), indent=2))
-#     print(f"\n{'='*70}\nERRORS\n{'='*70}")
-#     errors = final_state.get("sql_errors", [])
-#     print(json.dumps(errors, indent=2) if errors else "None")
-#     print(f"\n{'='*70}\nTOKEN BREAKDOWN\n{'='*70}")
-#     print(json.dumps(final_state.get("token_breakdown", {}), indent=2))
+#     return state
