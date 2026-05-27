@@ -6,6 +6,8 @@ from typing import Any, Optional
 from pydantic import BaseModel
 from src.agent.llm.base import BaseLLM
 from src.agent.utils.pretty_print import pretty_log
+from src.agent.prompt.intent_prompt import INTENT_CLASSIFIER_SYSTEM
+from src.agent.utils.prompt_utils import resolve_system_prompt
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
@@ -32,80 +34,6 @@ INTENT_ROUTE_MAP = {
 # Explicit markers for output format and graph type
 EXCEL_MARKER = "/excel"
 GRAPH_MARKER = "/graph"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# System Prompt
-# ─────────────────────────────────────────────────────────────────────────────
-
-INTENT_CLASSIFIER_SYSTEM = """\
-You are an Intent Classifier in a Text-to-SQL pipeline for non-technical users.
-You receive a refined user query along with domain context.
-
-You are given:
-- ConstructedQuery : the refined, self-contained user query
-- DomainContext    : the domain this system operates in (e.g. school, hospital, retail)
-
----
-
-INTENT CATEGORIES:
-
-SQL_QUERY     - Query requires fetching, filtering, aggregating data from the database.
-EXPLAIN       - Query asks to explain a previously generated SQL query or result.
-SUMMARIZE     - Query asks to summarise or recap previous conversation or results.
-GREETING      - Query is a greeting, farewell, pleasantry, or meta-question about the system.
-NEEDS_CLARITY - Query is too vague to classify or generate SQL — clarification required.
-
----
-
-ROUTING RULES:
-
-SQL_QUERY  → route to "QueryTranslation"
-EXPLAIN    → route to "Generate"
-SUMMARIZE  → route to "Generate"
-GREETING   → route to "Generate"
-NEEDS_CLARITY → route to "Generate"
-
-AMBIGUITY RULE:
-- If intent is ambiguous between SQL_QUERY and EXPLAIN: default to SQL_QUERY.
-
-NEEDS_CLARITY RULE:
-- Use NEEDS_CLARITY when:
-    → query is too vague even with domain context (e.g. "how many last week" with no timeframe)
-    → confidence would be below 0.6
-- Never use NEEDS_CLARITY for greetings or clearly scoped queries
-
----
-
-OUTPUT FORMAT RULES (only for SQL_QUERY):
-
-Support explicit markers only:
-- /excel  → user explicitly wants Excel output
-- /graph  → user explicitly wants graph output
-- otherwise → OutputFormat = null (let frontend decide)
-
-When OutputFormat is GRAPH, infer GraphType:
-- If query mentions /graph, default GraphType to "BAR" unless other context suggests otherwise
-- OutputFormat and GraphType must be null for non SQL_QUERY intents
-
----
-
-OUTPUT FORMAT (STRICT JSON ONLY):
-{
-    "Intent":        "SQL_QUERY" | "EXPLAIN" | "SUMMARIZE" | "GREETING" | "NEEDS_CLARITY",
-    "RouteTo":       "QueryTranslation" | "Generate",
-    "Confidence":    float (0.0–1.0),
-    "OutputFormat":  "GRAPH" | "EXCEL" | null,
-    "GraphType":     "LINE" | "BAR" | "PIE" | "SCATTER" | null,
-    "Reasoning":     "<one sentence explanation>"
-}
-
-Instructions:
-- Output ONLY valid JSON — no markdown, no preamble, no explanation outside JSON.
-- OutputFormat and GraphType must be null for non SQL_QUERY intents.
-- Never hallucinate a route — always derive from intent.
-- Only detect /excel and /graph markers.
-"""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -334,14 +262,19 @@ def intent_classifier_node(llm: BaseLLM, state: dict[str, Any]) -> dict[str, Any
     Reads from state:
         refined_query    : str
         domain_context   : str | None
+        prompt_client    : AgentPromptClient | None (optional, fetches prompt from API)
 
     Writes to state:
         intent           : dict                ← IntentClassifierOutput.to_dict()
     """
-    # from src.agent.llm.registry import get_llm
+    # Resolve system prompt using shared helper (prefers prompt_client)
+    system_prompt = resolve_system_prompt(
+        state, "intent_classifier", INTENT_CLASSIFIER_SYSTEM
+    )
 
-    # llm = get_llm("openai/gpt-oss-20b")
-    classifier = IntentClassifier(llm=llm, confidence_threshold=0.6)
+    classifier = IntentClassifier(
+        llm=llm, confidence_threshold=0.6, system_prompt=system_prompt
+    )
 
     output = classifier.classify(
         constructed_query=state["refined_query"],

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Optional
 
 from src.agent.observability import (
     configure_workflow_logging,
@@ -22,6 +22,7 @@ from src.agent.tools.executor import executor_node
 from src.agent.nodes.sql_results_validator import sql_post_execution_validator_node
 from src.agent.nodes.generate_response import response_generator_node
 from src.agent.orchestrator.engine import GraphEngine
+from src.agent.memory.session_context import SessionContext, extract_from_state
 
 
 def _normalize_connection(connection: Any) -> dict[str, Any]:
@@ -48,6 +49,9 @@ async def run_chat_pipeline(
     history: list[dict],
     connection: Any,
     model_name: str,
+    prompt_client: Any = None,
+    session_context: SessionContext | None = None,
+    user_role: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     Builds and runs the full agent pipeline.
@@ -58,7 +62,6 @@ async def run_chat_pipeline(
 
     connection_data = _normalize_connection(connection)
 
-    llm = get_llm(model_name="sqlcoder")
     trace = start_request_trace(
         {
             "user_query": user_query,
@@ -102,26 +105,43 @@ async def run_chat_pipeline(
         )
     )
 
-    initial_state = {
+    initial_state: dict[str, Any] = {
         "user_query": user_query,
         "history": history,
         "retry_count": 0,
         "errors": [],
         "db_type": connection_data.get("db_type", "mssql"),
         "server": connection_data["server"],
+        "connection_id": connection_data.get("connection_id"),
+        "user_id": connection_data.get("user_id"),
         "database": connection_data["database"],
         "username": connection_data["username"],
         "password": connection_data["password"],
         "port": connection_data.get("port"),
         "pool_size": connection_data.get("pool_size", 5),
         "timeout": connection_data.get("timeout", 30),
+        "prompt_client": prompt_client,
     }
 
+    # # ── Session context ───────────────────────────────────────────────────
+    # if session_context is not None:
+    #     sc = session_context
+    #     if getattr(sc, "session_id", None):
+    #         initial_state["session_id"] = sc.session_id
+    #     elif getattr(sc, "chat_id", None):
+    #         initial_state["session_id"] = sc.chat_id
+    #     if getattr(sc, "user_id", None):
+    #         initial_state["user_id"] = sc.user_id
+    #     if getattr(sc, "db_id", None):
+    #         initial_state["connection_id"] = sc.db_id
+    #     if getattr(sc, "db_type", None):
+    #         initial_state["db_type"] = sc.db_type
+    #     initial_state["session_context"] = sc.model_dump()
+
     llm = get_llm(model_name=model_name)
-    # llm_sql = get_llm(
-    #     model_name="sqlcoder"
-    # )  # FIX: use SQL-specific model for SQL nodes
+
     nodes_registry = {
+        # ── Query Refiner ─────────────────────────────────────────────────
         "query_refiner": trace_node(
             "query_refiner",
             lambda s: query_refiner(llm, s),
@@ -135,6 +155,7 @@ async def run_chat_pipeline(
                 "refined_query": r.get("refined_query"),
             },
         ),
+        # ── Intent Classifier ─────────────────────────────────────────────
         "intent_classifier": trace_node(
             "intent_classifier",
             lambda s: intent_classifier_node(llm, s),
@@ -148,6 +169,7 @@ async def run_chat_pipeline(
                 "intent": r.get("intent"),
             },
         ),
+        # ── Query Decomposer ──────────────────────────────────────────────
         "query_decomposer": trace_node(
             "query_decomposer",
             lambda s: query_decomposer(llm, s),
@@ -160,21 +182,23 @@ async def run_chat_pipeline(
                 "decomposed": r.get("decomposed"),
             },
         ),
+        # ── Views Fetcher ─────────────────────────────────────────────────
         "views_fetcher": trace_node(
             "views_fetcher",
             lambda s: views_fetcher_node(llm, s),
             input_builder=lambda s: {
                 "construct": s.get("construct"),
-                "decomposed": s.get("decomposed"),  # FIX: needed for sub_queries
+                "decomposed": s.get("decomposed"),
                 "history": s.get("history"),
                 "intent": s.get("intent"),
             },
             output_builder=lambda r: {
                 "views": r.get("views"),
                 "views_grade": r.get("views_grade"),
-                "view_suggestions": r.get("view_suggestions"),  # FIX: was missing
+                "view_suggestions": r.get("view_suggestions"),
             },
         ),
+        # ── Schema Fetcher ────────────────────────────────────────────────
         "schema_fetcher": trace_node(
             "schema_fetcher",
             lambda s: schema_fetcher_node(llm, s),
@@ -190,23 +214,34 @@ async def run_chat_pipeline(
                 "join_paths": r.get("join_paths"),
             },
         ),
+        # ── SQL Generator ─────────────────────────────────────────────────
         "sql_generator": trace_node(
             "sql_generator",
             lambda s: sql_generator_node(llm, s),
             input_builder=lambda s: {
                 "construct": s.get("construct"),
+                "user_query": s.get("user_query"),
                 "retrieved_schemas": s.get("retrieved_schemas"),
+                "sanitised_schema": s.get("sanitised_schema"),
                 "seed_tables": s.get("seed_tables"),
                 "join_paths": s.get("join_paths"),
                 "views": s.get("views"),
+                "mandatory_filters": s.get("mandatory_filters"),
+                "column_whitelist": s.get("column_whitelist"),
+                "permission_context": s.get("permission_context"),
                 "retry_feedback": s.get("retry_feedback"),
+                "last_filters": s.get("last_filters"),
             },
             output_builder=lambda r: {
                 "generated_sql": r.get("generated_sql"),
                 "token_count": r.get("token_count"),
+                "token_breakdown": r.get("token_breakdown"),
                 "hallucinated_tables": r.get("hallucinated_tables"),
+                "hallucinated_columns": r.get("hallucinated_columns"),
+                "sql_errors": r.get("sql_errors"),
             },
         ),
+        # ── SQL Validator ─────────────────────────────────────────────────
         "sql_validator": trace_node(
             "sql_validator",
             lambda s: sql_validator_node(llm, s),
@@ -215,6 +250,9 @@ async def run_chat_pipeline(
                 "retrieved_schemas": s.get("retrieved_schemas"),
                 "seed_tables": s.get("seed_tables"),
                 "join_paths": s.get("join_paths"),
+                "allowed_tables": s.get("allowed_tables"),
+                "mandatory_filters": s.get("mandatory_filters"),
+                "permission_context": s.get("permission_context"),
             },
             output_builder=lambda r: {
                 "validation_passed": r.get("validation_passed"),
@@ -222,6 +260,7 @@ async def run_chat_pipeline(
                 "validation_errors": r.get("validation_errors"),
             },
         ),
+        # ── Executor ──────────────────────────────────────────────────────
         "executor": trace_node(
             "executor",
             executor_node,
@@ -242,6 +281,7 @@ async def run_chat_pipeline(
                 ),
             },
         ),
+        # ── Post-execution Validator ──────────────────────────────────────
         "sql_post_execution_validator": trace_node(
             "sql_post_execution_validator",
             lambda s: sql_post_execution_validator_node(llm, s),
@@ -259,27 +299,25 @@ async def run_chat_pipeline(
                 "execution_analysis": r.get("execution_analysis"),
             },
         ),
-        # FIX: response_generator now receives all keys it needs
+        # ── Response Generator ────────────────────────────────────────────
         "response_generator": trace_node(
             "response_generator",
             lambda s: response_generator_node(llm, s),
             input_builder=lambda s: {
                 "user_query": s.get("user_query"),
-                "history": s.get("history"),  # FIX: was missing
+                "history": s.get("history"),
                 "intent": s.get("intent"),
-                "construct": s.get("construct"),  # FIX: was missing
+                "construct": s.get("construct"),
                 "generated_sql": s.get("generated_sql"),
                 "execution_result": s.get("execution_result"),
                 "execution_analysis": s.get("execution_analysis"),
-                "retrieved_schemas": s.get("retrieved_schemas"),  # FIX: was missing
-                "view_suggestions": s.get("view_suggestions"),  # FIX: was missing
+                "retrieved_schemas": s.get("retrieved_schemas"),
+                "view_suggestions": s.get("view_suggestions"),
             },
             output_builder=lambda r: {
                 "user_facing_response": r.get("user_facing_response"),
                 "response_token_breakdown": r.get("response_token_breakdown"),
-                "view_suggestions_shown": r.get(
-                    "view_suggestions_shown"
-                ),  # FIX: was missing
+                "view_suggestions_shown": r.get("view_suggestions_shown"),
             },
         ),
     }
@@ -287,8 +325,26 @@ async def run_chat_pipeline(
     engine = GraphEngine(nodes=nodes_registry)
     try:
         final_state = await engine.run(initial_state)
+
+        # ── Enrich final state for session persistence ────────────────────
+        final_state["last_refined_query"] = final_state.get("refined_query")
+        intent_obj = final_state.get("intent")
+        final_state["last_intent"] = (
+            intent_obj.get("intent") if isinstance(intent_obj, dict) else None
+        )
+        final_state["last_confirmed_sql"] = final_state.get("generated_sql")
+        final_state["last_tables_used"] = final_state.get("seed_tables", [])
+        final_state["last_filters"] = (
+            final_state.get("last_filters") or final_state.get("filters") or {}
+        )
+        final_state["last_skeleton_id"] = final_state.get("last_skeleton_id")
+        final_state["turn_count"] = (
+            final_state.get("turn_number") or final_state.get("turn_count") or 1
+        )
+
         finish_request_trace(final_state=final_state, status="success")
         return final_state
+
     except Exception as exc:
         finish_request_trace(final_state=initial_state, error=str(exc), status="error")
         raise
