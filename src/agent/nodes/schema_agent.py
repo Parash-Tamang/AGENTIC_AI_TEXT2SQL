@@ -31,8 +31,13 @@ from pydantic import BaseModel, Field
 
 from src.agent.llm.base import BaseLLM
 from src.agent.llm.registry import get_llm
+from src.agent.prompt.schema_agent import (
+    SCHEMA_SEED_FILTER_SYSTEM,
+    SCHEMA_SUFFICIENCY_SYSTEM,
+)
 from src.agent.tools.executor import dispatch, SchemaResult
 from src.agent.utils.pretty_print import pretty_log
+from src.agent.utils.prompt_utils import resolve_system_prompt
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -47,68 +52,6 @@ MAX_BFS_HOPS = 2  # depth 2 covers most real queries; 3+ adds noise
 MAX_BFS_FILTER_DEPTH = 3  # agent can request depth-3 on retry
 MAX_SCHEMA_SUFFICIENCY_RETRIES = 3
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# System Prompts  (JSON contract mirrors query_refiner pattern)
-# ─────────────────────────────────────────────────────────────────────────────
-
-_SEED_FILTER_SYSTEM = """\
-You are a Seed Table Extractor in a Text-to-SQL pipeline.
-
-You receive:
-- ConstructedQuery     : the refined user query
-- StructuralSignals    : query-shape insights extracted from views
-                         (e.g. "school-level aggregation", "pre-joined data")
-- CandidateTables      : tables returned by semantic search, with one-line descriptions
-
-Your job:
-1. Read the query and structural signals carefully.
-2. Filter CandidateTables to keep only the tables directly needed to answer
-   the query. Remove audit tables, archive tables, lookup tables not referenced
-   in the query intent, and duplicates.
-3. Return the filtered list as SeedTables.
-4. If BFS should go deeper than the default 2 hops (e.g. complex multi-join
-   query), set requested_bfs_depth to 3, otherwise leave it at 2.
-
-OUTPUT FORMAT — strict JSON only, no markdown, no preamble:
-{
-    "seed_tables": ["table_name_1", "table_name_2"],
-    "reasoning": "...",
-    "requested_bfs_depth": 2
-}
-
-Rules:
-- seed_tables must be UNQUALIFIED table names (no schema prefix).
-- Keep minimum tables needed — BFS will find the joins.
-- Never add tables not present in CandidateTables.
-- requested_bfs_depth must be 2 or 3 only.
-"""
-
-_SCHEMA_SUFFICIENCY_SYSTEM = """\
-You are a Schema Coverage Validator in a Text-to-SQL pipeline.
-
-You receive:
-- UserQuery: original/refined user intent
-- FinalSchemas: schemas currently selected for SQL generation
-- JoinPaths: discovered join paths
-
-Your task:
-1. Decide whether current schemas are sufficient to answer the query.
-2. If not sufficient, list additional table names likely required.
-3. Provide short reasoning.
-
-OUTPUT FORMAT — strict JSON only, no markdown, no preamble:
-{
-    "is_sufficient": true or false,
-    "missing_tables": ["table1", "table2"],
-    "reasoning": "..."
-}
-
-Rules:
-- missing_tables must be table names only (no columns, no SQL).
-- Prefer unqualified names when possible.
-- Return empty missing_tables when is_sufficient is true.
-"""
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Pydantic models
@@ -240,6 +183,7 @@ def _run_schema_sufficiency_check(
     user_query: str,
     schemas: list[SchemaResult],
     join_paths: list[dict] | list[str],
+    system_prompt: str,
 ) -> SchemaCoverageResult:
     """LLM coverage check over final schemas + join paths."""
     if not schemas:
@@ -275,7 +219,7 @@ def _run_schema_sufficiency_check(
         }
 
         raw = llm.generate(
-            system_prompt=_SCHEMA_SUFFICIENCY_SYSTEM,
+            system_prompt=system_prompt,
             user_prompt=user_prompt,
             response_format=response_format,
             json_mode=True,
@@ -374,6 +318,7 @@ def _run_seed_filter(
     constructed_query: str,
     structural_signals: list[str],
     schemas: list[SchemaResult],
+    system_prompt: str,
 ) -> SeedFilterResult:
     """
     LLM agent reads views structural_signals + candidate schemas and returns
@@ -409,7 +354,7 @@ def _run_seed_filter(
         }
 
         raw = llm.generate(
-            system_prompt=_SEED_FILTER_SYSTEM,
+            system_prompt=system_prompt,
             user_prompt=user_prompt,
             response_format=response_format,
             json_mode=True,
@@ -624,6 +569,13 @@ def schema_fetcher_node(
     join_paths: list[dict] = []
 
     if run_bfs and schemas_state.schemas:
+        seed_filter_prompt = resolve_system_prompt(
+            state, "schema_seed_filter", SCHEMA_SEED_FILTER_SYSTEM
+        )
+        sufficiency_prompt = resolve_system_prompt(
+            state, "schema_sufficiency", SCHEMA_SUFFICIENCY_SYSTEM
+        )
+
         # ── Step 2: LLM seed filter ───────────────────────────────────────────
         # Read structural signals that views_agent extracted in role 1
         structural_signals: list[str] = state.get("views_grade", {}).get(
@@ -634,6 +586,7 @@ def schema_fetcher_node(
             constructed_query=constructed_query,
             structural_signals=structural_signals,
             schemas=schemas_state.schemas,
+            system_prompt=seed_filter_prompt,
         )
         seed_tables = filter_result.seed_tables
         bfs_depth = filter_result.requested_bfs_depth
@@ -656,6 +609,7 @@ def schema_fetcher_node(
                     user_query=user_query_for_validation,
                     schemas=schemas_state.schemas,
                     join_paths=join_paths,
+                    system_prompt=sufficiency_prompt,
                 )
                 coverage_history.append({"attempt": attempt, **coverage.model_dump()})
 

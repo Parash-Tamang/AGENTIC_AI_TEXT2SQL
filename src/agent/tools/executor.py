@@ -85,7 +85,7 @@ def _normalize_execution_result(result: Any) -> dict[str, Any]:
             "type": "DataFrame",
             "shape": list(df.shape),
             "rows": df.head(50).to_dict(orient="records"),
-            "sample_rows": df.head(3).to_dict(orient="records"),
+            "sample_rows": df.head(20).to_dict(orient="records"),
             "rowcount": int(df.shape[0]),
             "error": None,
         }

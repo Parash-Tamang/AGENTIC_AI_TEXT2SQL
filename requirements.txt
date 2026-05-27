@@ -16,3 +16,5 @@ networkx==3.6.1
 python-frontmatter==1.1.0
 ollama==0.6.2
 sqlglot==30.8.0
+tenacity==9.1.4
+ratelimit==2.2.1

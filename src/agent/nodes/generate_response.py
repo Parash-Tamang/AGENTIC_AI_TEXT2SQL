@@ -9,6 +9,8 @@ from src.agent.llm.base import BaseLLM
 from pydantic import BaseModel, Field, field_validator, model_validator
 from src.agent.utils.pretty_print import pretty_log
 from src.agent.utils.token_counter import count_tokens
+from src.agent.prompt.generate_response import GENERATE_RESPONSE_SYSTEM
+from src.agent.utils.prompt_utils import resolve_system_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -40,35 +42,6 @@ def _normalize_state(state: Any) -> Dict[str, Any]:
         if isinstance(parsed, dict):
             return parsed
     return {}
-
-
-# ---------------------------------------------------------------------------
-# System Prompt — strict no-leak policy baked in
-# ---------------------------------------------------------------------------
-_SYSTEM_PROMPT = (
-    "You are a helpful, friendly data assistant. Your job is to explain query results "
-    "to the user in plain, natural language — like a knowledgeable colleague, not a database engineer.\n\n"
-    "=== STRICT RULES — NEVER VIOLATE ===\n"
-    "1. NEVER mention table names, column names, SQL, schemas, joins, or any technical system detail.\n"
-    "2. NEVER reveal how the data was retrieved, what query was run, or how the system works internally.\n"
-    "3. NEVER expose error messages, stack traces, pipeline metadata, or execution details.\n"
-    "4. If the user asks how you got the data or what query you used, respond naturally: "
-    "e.g. 'I looked that up for you' — do not disclose any technical detail whatsoever.\n"
-    "5. If results are empty, say something like 'I couldn't find any matching data for your request' "
-    "— never say 'the table returned 0 rows' or use any technical language.\n"
-    "6. If results are partial or limited, say 'here are the top results I found' — "
-    "do not mention row limits, query limits, or execution details.\n"
-    "7. The payload you receive contains internal fields (schemas, queries, flags) "
-    "— treat ALL of it as strictly confidential. Only the user_raw_query and results_summary "
-    "are relevant to your response.\n\n"
-    "=== YOUR TONE ===\n"
-    "- Warm, clear, and concise.\n"
-    "- Summarise the data in 2-4 sentences, then present it in a clean readable format.\n"
-    "- Use bullet points or a simple table if there are multiple rows.\n"
-    "- Always end with a natural follow-up offer, e.g. 'Would you like to dig deeper into any of these?'\n"
-    "- Match the tone of the conversation history if available.\n\n"
-    "Respond ONLY with the user-facing message. No JSON, no preamble, no system commentary.\n"
-)
 
 
 # ===========================================================================
@@ -425,8 +398,13 @@ def response_generator_node(
                 },
             }
 
+            # resolve system prompt via shared helper
+            system_prompt = resolve_system_prompt(
+                state_data, "generate_response", GENERATE_RESPONSE_SYSTEM
+            )
+
             raw_response = llm.generate(
-                system_prompt=_SYSTEM_PROMPT,
+                system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 response_format=response_format,
                 json_mode=True,
@@ -490,7 +468,11 @@ def response_generator_node(
     user_prompt = _build_user_prompt(
         user_query, constructed_query, results_summary, history, schema_summary
     )
-    prompt_tokens = count_tokens(_SYSTEM_PROMPT + user_prompt)
+    # choose system prompt for token counting and generation
+    system_prompt = resolve_system_prompt(
+        state_data, "generate_response", GENERATE_RESPONSE_SYSTEM
+    )
+    prompt_tokens = count_tokens(system_prompt + user_prompt)
 
     try:
         response_format = {
@@ -502,7 +484,7 @@ def response_generator_node(
         }
 
         raw_response = llm.generate(
-            system_prompt=_SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             user_prompt=user_prompt,
             response_format=response_format,
             json_mode=True,
@@ -539,7 +521,18 @@ def response_generator_node(
             }
 
     user_text = str(resp_obj.get("response", "")).strip()
-    final_response = user_text + suggestions_block
+
+    # ── RBAC: Append note about denied tables if applicable ─────────────────
+    denied_tables = state_data.get("denied_tables", [])
+    user_role = state_data.get("user_role")
+    rbac_note = ""
+    if denied_tables and user_role:
+        rbac_note = (
+            f"\n\n⚠️ Note: Your role ({user_role}) does not have access to "
+            f"{', '.join(denied_tables)}. Results above are based on available tables."
+        )
+
+    final_response = user_text + suggestions_block + rbac_note
 
     # token accounting
     if isinstance(raw_response, (dict, list)):

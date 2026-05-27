@@ -56,6 +56,7 @@ from pydantic import BaseModel, Field, field_validator
 from src.agent.llm.base import BaseLLM
 from src.agent.prompt.refiner import REFINER_SYSTEM
 from src.agent.utils.pretty_print import pretty_log
+from src.agent.utils.filter_extractor import filter_has_column
 
 logger = logging.getLogger(__name__)
 
@@ -180,33 +181,73 @@ def _build_retry_hint(feedback: RetryFeedback) -> str:
     )
 
 
+def _has_session_context(state: Dict[str, Any]) -> bool:
+    """Check if state has meaningful session context (last_filters, last_intent, etc.)."""
+    last_refined = state.get("last_refined_query", "")
+    last_intent = state.get("last_intent", "")
+    last_filters = state.get("last_filters", {})
+    last_tables = state.get("last_tables_used", [])
+
+    return bool(last_refined or last_intent or last_filters or last_tables)
+
+
+def _build_session_context_block(state: Dict[str, Any]) -> Optional[str]:
+    """Build a session context block for CONTINUE queries.
+
+    Returns JSON block describing last query's filters, intent, and tables,
+    or None if no meaningful session context exists.
+    """
+    if not _has_session_context(state):
+        return None
+
+    last_refined = state.get("last_refined_query", "")
+    last_intent = state.get("last_intent", "")
+    last_filters = state.get("last_filters", {})
+    last_tables = state.get("last_tables_used", [])
+
+    context_block = {
+        "LastQuery": last_refined,
+        "LastIntent": last_intent,
+        "LastTablesUsed": last_tables,
+        "LastFiltersApplied": last_filters or {},
+    }
+
+    return json.dumps(context_block, ensure_ascii=False, indent=2)
+
+
 def _build_user_prompt(
     user_query: str,
     feedback: Optional[RetryFeedback],
+    session_context_block: Optional[str] = None,
 ) -> str:
     """
     Build the user-facing prompt sent to the LLM.
 
-    For RETRY, a structured ``RetryContext`` block is appended so the model
-    knows exactly what went wrong and how to fix it.
+    For RETRY, a structured ``RetryContext`` block is appended.
+    For CONTINUE, a ``SessionContext`` block is appended with last query's filters/intent.
     """
-    if feedback is None:
+    if feedback is None and session_context_block is None:
         return user_query
 
-    hint = _build_retry_hint(feedback)
+    prompt_obj: Dict[str, Any] = {"CurrentQuery": user_query}
 
-    retry_block = {
-        "OriginalQuery": user_query,
-        "RetryContext": {
+    if feedback is not None:
+        hint = _build_retry_hint(feedback)
+        prompt_obj["RetryContext"] = {
             "issues": feedback.issues,
             "reasoning": feedback.reasoning,
             "failed_sql": feedback.failed_sql,
             "hint": hint,
             "attempt": feedback.attempt,
-        },
-    }
+        }
 
-    return json.dumps(retry_block, ensure_ascii=False)
+    if session_context_block is not None:
+        try:
+            prompt_obj["SessionContext"] = json.loads(session_context_block)
+        except json.JSONDecodeError:
+            prompt_obj["SessionContext"] = session_context_block
+
+    return json.dumps(prompt_obj, ensure_ascii=False)
 
 
 def _strip_markdown_fences(raw: str) -> str:
@@ -289,13 +330,18 @@ def query_refiner(
 
     feedback: Optional[RetryFeedback] = _parse_retry_feedback(raw_feedback)
 
+    # Build session context block for CONTINUE detection
+    session_context_block = _build_session_context_block(state)
+    has_session_context = session_context_block is not None
+
     # Build prompt
     prompt: str = system_prompt or REFINER_SYSTEM
-    user_prompt: str = _build_user_prompt(user_query, feedback)
+    user_prompt: str = _build_user_prompt(user_query, feedback, session_context_block)
 
     logger.debug(
-        "query_refiner called | has_feedback=%s | query=%r",
+        "query_refiner called | has_feedback=%s | has_session_context=%s | query=%r",
         feedback is not None,
+        has_session_context,
         user_query[:80],
     )
 
@@ -402,6 +448,7 @@ def query_refiner(
             extra={
                 "classification": result.classification,
                 "confidence": result.confidence,
+                "has_session_context": has_session_context,
             },
         )
     except Exception:

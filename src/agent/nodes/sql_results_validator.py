@@ -66,7 +66,9 @@ LOG_DIR = Path(__file__).resolve().parent / "logs"
 SQL_VALIDATION_LOG = LOG_DIR / "sql_post_execution_validation.jsonl"
 from src.agent.nodes.state import get_fetched_views
 from src.agent.llm.base import BaseLLM
+from src.agent.prompt.sql_results_validator import SQL_RESULTS_VALIDATOR_SYSTEM
 from src.agent.utils.pretty_print import pretty_log
+from src.agent.utils.prompt_utils import resolve_system_prompt
 
 # ---------------------------------------------------------------------------
 # Token counting - graceful fallback when tiktoken is unavailable
@@ -102,29 +104,19 @@ _CRITICAL_PENALTIES: Dict[str, int] = {
     "semantic_critical": 30,
     "execution_error": 50,
     "empty_result": 40,
-    "duplicate_rows": 30,
-    "join_explosion": 40,
 }
 
-_CRITICAL_ISSUE_KEYS = frozenset(_CRITICAL_PENALTIES.keys())
-
-_SYSTEM_PROMPT = (
-    "You are a SQL Results Validator. Given the original UserQuery, the SQL that was executed,\n"
-    "the authoritative schemas, join paths, and the execution results sample, produce a single\n"
-    "JSON object that answers whether the results are consistent with the intent and schema.\n\n"
-    "REQUIREMENTS:\n"
-    "- Only output a single JSON object (no text, no markdown fences).\n"
-    "- Required fields:\n"
-    "    valid     : boolean  - are results semantically correct for the query and SQL?\n"
-    "    score     : float    - confidence 0.0 .. 1.0\n"
-    '    issues    : list[str]- short issue keys, e.g. ["empty_result", "aggregation_mismatch"]\n'
-    "    reasoning : str      - concise human-readable explanation\n"
-    "    retry     : boolean  - should the SQL generator retry/regenerate?\n\n"
-    "Focus on:\n"
-    "- Whether returned rows match the expected aggregation / grouping semantics.\n"
-    "- Whether zero rows is plausible or indicates a logic error.\n"
-    "- Whether duplicates, suspicious NULLs, or unexpected columns are present.\n"
-    "- Whether JOINs appear to have exploded the result set beyond a reasonable size.\n"
+_CRITICAL_ISSUE_KEYS = frozenset(
+    {
+        "syntax_error",
+        "missing_tables",
+        "missing_columns",
+        "aggregation_issues",
+        "semantic_invalid",
+        "semantic_critical",
+        "execution_error",
+        "empty_result",
+    }
 )
 
 
@@ -579,7 +571,11 @@ def sql_post_execution_validator_node(
     }
 
     user_prompt = json.dumps(payload, ensure_ascii=False)
-    prompt_tokens = _count_tokens(_SYSTEM_PROMPT + user_prompt)
+    # resolve system prompt for validation
+    system_prompt = resolve_system_prompt(
+        state, "sql_results_validator", SQL_RESULTS_VALIDATOR_SYSTEM
+    )
+    prompt_tokens = _count_tokens(system_prompt + user_prompt)
 
     try:
         response_format = {
@@ -591,7 +587,7 @@ def sql_post_execution_validator_node(
         }
 
         raw_llm_output = llm.generate(
-            system_prompt=_SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             user_prompt=user_prompt,
             response_format=response_format,
             json_mode=True,

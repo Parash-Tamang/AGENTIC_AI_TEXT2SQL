@@ -13,6 +13,8 @@ import json
 from typing import Any, List, Dict, Optional
 from pydantic import BaseModel, Field, ConfigDict
 
+from src.models.permission_context import PermissionContext
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Input/Intermediate Models
 # ─────────────────────────────────────────────────────────────────────────────
@@ -126,6 +128,8 @@ class RAGState(BaseModel):
     # ── CONNECTION FIELDS ─────────────────────────────────────────────────────
     db_type: Optional[str] = None
     server: Optional[str] = None
+    connection_id: Optional[str] = None
+    user_id: Optional[str] = None
     database: Optional[str] = None
     username: Optional[str] = None
     password: Optional[str] = None
@@ -153,6 +157,18 @@ class RAGState(BaseModel):
     schema_coverage_history: List[Dict[str, Any]] = Field(default_factory=list)
     # Convenience: some nodes expect a top-level refined_query string
     refined_query: Optional[str] = None
+
+    # ── RBAC FIELDS ───────────────────────────────────────────────────────────
+    # Role-based access control
+    permission_context: Optional[PermissionContext] = None
+    user_role: Optional[str] = None  # e.g., "customer", "sales", "admin"
+    # Schema after permission filtering
+    sanitised_schema: Dict[str, List[str]] = Field(default_factory=dict)
+    # Permission guard outputs
+    allowed_tables: List[str] = Field(default_factory=list)
+    denied_tables: List[str] = Field(default_factory=list)
+    mandatory_filters: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    column_whitelist: Dict[str, Optional[List[str]]] = Field(default_factory=dict)
 
     # ── METADATA FIELDS ───────────────────────────────────────────────────────
     # For tracking and debugging
@@ -217,8 +233,33 @@ def create_initial_state(
     history: Optional[List[Dict[str, str]]] = None,
     session_id: Optional[str] = None,
     connection: Optional[Dict[str, Any]] = None,
+    user_role: Optional[str] = None,
 ) -> dict[str, Any]:
+    """
+    Create initial state for LangGraph execution.
+
+    Args:
+        user_query: User's natural language question
+        domain_context: Domain context (default: "general")
+        history: Conversation history
+        session_id: Session ID for tracking
+        connection: Database connection parameters
+        user_role: User's role for RBAC (e.g., "customer", "sales", "admin")
+
+    Returns:
+        Dictionary representing initial state
+    """
+    from src.agent.config import get_permission_context
+
     connection_data = _normalize_connection(connection)
+
+    permission_context = None
+    if user_role:
+        try:
+            permission_context = get_permission_context(user_role)
+        except KeyError:
+            raise ValueError(f"Unknown role: {user_role}")
+
     state = RAGState(
         user_query=user_query,
         domain_context=domain_context,
@@ -226,7 +267,11 @@ def create_initial_state(
         session_id=session_id,
         turn_number=1,
         refined_query=user_query,
+        user_role=user_role,
+        permission_context=permission_context,
         db_type=connection_data.get("db_type"),
+        connection_id=connection_data.get("connection_id"),
+        user_id=connection_data.get("user_id"),
         server=connection_data.get("server"),
         database=connection_data.get("database"),
         username=connection_data.get("username"),
