@@ -169,13 +169,14 @@ class IntentClassifier:
                 output_format = None
                 graph_type = None
 
-            # enforce null graph_type when not a graph
-            if output_format != "GRAPH":
-                graph_type = None
+            # If graph_type is set, infer output_format as GRAPH
+            if graph_type is not None:
+                output_format = "GRAPH"
 
             # validate values
             intent = intent if intent in VALID_INTENTS else "SQL_QUERY"
             output_format = output_format if output_format in VALID_FORMATS else None
+            graph_type = graph_type.upper() if graph_type else None
             graph_type = graph_type if graph_type in VALID_GRAPH_TYPES else None
 
             # derive route from intent
@@ -236,17 +237,11 @@ class IntentClassifier:
     # prior-result and history detection removed — classifier no longer relies on conversation state
 
     def _infer_output_format(self, query: str) -> str | None:
-        """Detect explicit markers only: /excel or /graph."""
-        if EXCEL_MARKER in query:
-            return "EXCEL"
-        if GRAPH_MARKER in query:
-            return "GRAPH"
+        """Let LLM decide output format."""
         return None
 
     def _infer_graph_type(self, query: str) -> str | None:
-        """Default to BAR when /graph is present."""
-        if GRAPH_MARKER in query:
-            return "BAR"
+        """Let LLM decide graph type."""
         return None
 
 

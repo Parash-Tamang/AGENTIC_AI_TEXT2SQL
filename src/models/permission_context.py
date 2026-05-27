@@ -7,6 +7,9 @@ on database tables and columns.
 
 from __future__ import annotations
 
+import json
+from functools import lru_cache
+from pathlib import Path
 from typing import Literal, Optional
 from pydantic import BaseModel, model_validator
 
@@ -119,3 +122,16 @@ def build_permission_context(role: str, rbac_json: dict) -> PermissionContext:
         for table_name, table_data in raw_tables.items()
     }
     return PermissionContext(role=role, tables=tables)
+
+
+@lru_cache(maxsize=1)
+def _load_rbac_json() -> dict:
+    """Load permissions.json from repo root (cached)."""
+    permissions_path = Path(__file__).resolve().parents[2] / "permissions.json"
+    with permissions_path.open("r", encoding="utf-8") as file_handle:
+        return json.load(file_handle)
+
+
+def get_permission_context(role: str) -> PermissionContext:
+    """Get PermissionContext for a role by reading permissions.json."""
+    return build_permission_context(role, _load_rbac_json())

@@ -319,6 +319,7 @@ def _build_user_prompt(
     results_summary: Dict[str, Any],
     history: List[Dict[str, str]],
     schema_summary: _SchemaSummary,
+    graph_data: Optional[Dict[str, Any]] = None,
 ) -> str:
     payload: Dict[str, Any] = {
         "user_raw_query": user_query,
@@ -328,6 +329,20 @@ def _build_user_prompt(
     }
     if schema_summary.tables:
         payload["_internal_schema_hint"] = schema_summary.tables
+    # Include visualization metadata (friendly summary) when available so the
+    # response LLM can reference the chart and tell the user about it.
+    if graph_data:
+        viz_summary = {
+            "chart_type": graph_data.get("chart_type"),
+            "title": graph_data.get("title"),
+            "reasoning": graph_data.get("reasoning"),
+        }
+        # For stat_card include the raw numeric value for concise presentation
+        if graph_data.get("chart_type") == "stat_card":
+            viz_summary["value"] = graph_data.get("value")
+        # Signal whether an image/png was rendered and included in state
+        viz_summary["has_image"] = bool(graph_data.get("png_bytes"))
+        payload["visualization"] = viz_summary
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -351,6 +366,17 @@ def response_generator_node(
     user_query = str(state_data.get("user_query", "")).strip()
     if not user_query:
         return {**state_data, "response_error": "no_user_query"}
+
+    # Hard stop for RBAC denial. Schema fetcher already built the final message,
+    # and we must not let the LLM rewrite or soften it.
+    if state_data.get("permission_denied") and state_data.get("user_facing_response"):
+        final_response = str(state_data.get("user_facing_response", "")).strip()
+        return {
+            **state_data,
+            "user_facing_response": final_response,
+            "response_token_breakdown": {},
+            "view_suggestions_shown": [],
+        }
 
     # ── Read intent from state ────────────────────────────────────────
     intent_data = state_data.get("intent") or {}
@@ -466,7 +492,12 @@ def response_generator_node(
     results_status = results_summary["status"]
 
     user_prompt = _build_user_prompt(
-        user_query, constructed_query, results_summary, history, schema_summary
+        user_query,
+        constructed_query,
+        results_summary,
+        history,
+        schema_summary,
+        state_data.get("graph_data"),
     )
     # choose system prompt for token counting and generation
     system_prompt = resolve_system_prompt(

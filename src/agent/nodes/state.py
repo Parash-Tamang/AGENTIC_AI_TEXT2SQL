@@ -161,7 +161,7 @@ class RAGState(BaseModel):
     # ── RBAC FIELDS ───────────────────────────────────────────────────────────
     # Role-based access control
     permission_context: Optional[PermissionContext] = None
-    user_role: Optional[str] = None  # e.g., "customer", "sales", "admin"
+    user_role: str  # e.g., "customer", "sales", "admin"
     # Schema after permission filtering
     sanitised_schema: Dict[str, List[str]] = Field(default_factory=dict)
     # Permission guard outputs
@@ -200,6 +200,9 @@ class RAGState(BaseModel):
     response_token_breakdown: Dict[str, Any] = Field(default_factory=dict)
     response_error: Optional[str] = None
 
+    # Graph builder output
+    graph_data: Optional[Dict[str, Any]] = None
+
     model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
 
 
@@ -229,36 +232,37 @@ def _normalize_connection(connection: Optional[Any]) -> dict[str, Any]:
 
 def create_initial_state(
     user_query: str,
+    user_role: str,
     domain_context: str = "general",
     history: Optional[List[Dict[str, str]]] = None,
     session_id: Optional[str] = None,
     connection: Optional[Dict[str, Any]] = None,
-    user_role: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     Create initial state for LangGraph execution.
 
     Args:
         user_query: User's natural language question
+        user_role: User's role for RBAC (e.g., "customer", "sales", "admin")
         domain_context: Domain context (default: "general")
         history: Conversation history
         session_id: Session ID for tracking
         connection: Database connection parameters
-        user_role: User's role for RBAC (e.g., "customer", "sales", "admin")
 
     Returns:
         Dictionary representing initial state
     """
-    from src.agent.config import get_permission_context
+    from src.models.permission_context import get_permission_context
 
     connection_data = _normalize_connection(connection)
 
-    permission_context = None
-    if user_role:
-        try:
-            permission_context = get_permission_context(user_role)
-        except KeyError:
-            raise ValueError(f"Unknown role: {user_role}")
+    if not user_role:
+        raise ValueError("user_role is required")
+
+    try:
+        permission_context = get_permission_context(user_role)
+    except KeyError as exc:
+        raise ValueError(f"Unknown role: {user_role}") from exc
 
     state = RAGState(
         user_query=user_query,

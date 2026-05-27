@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from src.agent.prompt import initialize_pipeline_sync, AgentPromptClient
@@ -8,6 +8,7 @@ from src.api_response import ApiResult
 from src.exceptions import AppBaseException
 from src.agent.orchestrator.chat import run_chat_pipeline
 from src.agent.memory.session_context import SessionContext, extract_from_state
+import base64
 
 
 class LocalPromptClient:
@@ -51,17 +52,13 @@ class ConnectionConfig(BaseModel):
     port: int = Field(default=1143, description="Database port")
     pool_size: int = Field(default=5, description="Connection pool size")
     timeout: int = Field(default=30, description="Connection timeout in seconds")
-    user_id: str = Field(default=None, description="Optional caller user id")
-    user_role: str = Field(
-        default=None, description="Optional caller role for RBAC (e.g., customer)"
-    )
 
 
 class ChatRequest(BaseModel):
     user_id: str = Field(..., description="Unique identifier for the user")
     query: str = Field(..., description="The user's input query")
-    user_role: Optional[str] = Field(
-        default=None, description="Optional caller role for RBAC (e.g., customer)"
+    user_role: str = Field(
+        ..., description="Caller role for RBAC (e.g., customer, sales, admin)"
     )
     history: List[ChatMessage] = Field(
         default_factory=list, description="Previous conversation history"
@@ -113,8 +110,7 @@ async def handle_chat(request: ChatRequest) -> ApiResult:
         # Include the user query in the connection context for downstream tracing/auditing
         connection_dict["query"] = request.query
 
-        # Determine effective role: explicit request.user_role overrides connection-level value
-        effective_role = request.user_role or connection_dict.get("user_role")
+        effective_role = request.user_role
 
         final_state = await run_chat_pipeline(
             user_query=request.query,
@@ -130,6 +126,34 @@ async def handle_chat(request: ChatRequest) -> ApiResult:
             "user_facing_response", "No response generated."
         )
         response_session_context = extract_from_state(final_state)
+        # Include visualization graph data (image) in API response if available
+        graph_out = None
+        graph_data = final_state.get("graph_data")
+        if isinstance(graph_data, dict):
+            graph_out = {
+                "chart_type": graph_data.get("chart_type"),
+                "title": graph_data.get("title"),
+                "reasoning": graph_data.get("reasoning"),
+            }
+            if graph_data.get("chart_type") == "stat_card":
+                graph_out["value"] = graph_data.get("value")
+
+            # Include PNG bytes as a Base64 string (safe for JSON transport)
+            png = graph_data.get("png_bytes")
+            if png:
+                try:
+                    graph_out["png_bytes"] = base64.b64encode(png).decode("ascii")
+                    graph_out["image_mime"] = "image/png"
+                except Exception:
+                    graph_out["png_bytes"] = None
+
+            # Include server-side saved path if present and expose as an URL
+            image_path = graph_data.get("image_path")
+            if image_path:
+                # Expose a simple relative URL to the saved asset. The server
+                # should serve `assets/` as static files for this to be resolvable.
+                graph_out["image_url"] = f"/{image_path}"
+                graph_out["image_path"] = image_path
 
         return ApiResult(
             success=True,
@@ -137,8 +161,23 @@ async def handle_chat(request: ChatRequest) -> ApiResult:
             data={
                 "response": response_text,
                 "session_context": response_session_context.model_dump(),
+                "graph": graph_out,
             },
         )
+
+    except ValueError as exc:
+        message = str(exc)
+        if "Unknown role:" in message:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Role does not exist.",
+            ) from exc
+        if "user_role is required" in message:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="user_role is required.",
+            ) from exc
+        return ApiResult(success=False, message=message, data=None)
 
     except AppBaseException as app_exc:
         return ApiResult(success=False, message=str(app_exc), data=None)

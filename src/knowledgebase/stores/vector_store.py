@@ -122,6 +122,7 @@ class VectorStore:
         top_k: Optional[int] = None,
         schema_name: Optional[str] = None,
         table_name: Optional[str] = None,
+        table_names: Optional[list[str]] = None,
     ) -> list[dict[str, Any]]:
         """Query schema collection scoped to a database."""
         if not database_name:
@@ -130,6 +131,7 @@ class VectorStore:
         where_clause = self._build_where_clause(
             schema_name=schema_name,
             table_name=table_name,
+            table_names=table_names,
         )
 
         return self._query_collection(
@@ -288,6 +290,7 @@ class VectorStore:
     def _build_where_clause(
         schema_name: Optional[str] = None,
         table_name: Optional[str] = None,
+        table_names: Optional[list[str]] = None,
         view_name: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
         """
@@ -300,6 +303,11 @@ class VectorStore:
             conditions.append({"schema_name": schema_name})
         if table_name:
             conditions.append({"table_name": table_name})
+        if table_names:
+            if len(table_names) == 1:
+                conditions.append({"table_name": table_names[0]})
+            else:
+                conditions.append({"table_name": {"$in": table_names}})
         if view_name:
             conditions.append({"view_name": view_name})
 

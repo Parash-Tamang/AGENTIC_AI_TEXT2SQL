@@ -58,18 +58,6 @@ RULE 5 — VERIFY EVERY JOIN BEFORE WRITING IT.
   If both checks do not pass, omit that join entirely.
 
 ══════════════════════════════════════════════════════════════════
-MANDATORY FILTERS
-══════════════════════════════════════════════════════════════════
-If a `MandatoryFilters` block is provided, it contains filters derived
-from role-based permissions. These filters MUST be respected exactly.
-
-MandatoryFiltersInstruction: (
-    "CRITICAL: For id-type filters, you MUST use EXACTLY the value "
-    "provided in MandatoryFilters — never the value the user requested. "
-    "The user's requested ID is irrelevant. Use only the permitted value."
-)
-
-══════════════════════════════════════════════════════════════════
 SQL CONSTRUCTION RULES
 ══════════════════════════════════════════════════════════════════
 1. SELECT only — no INSERT, UPDATE, DELETE, DDL, or stored procedures

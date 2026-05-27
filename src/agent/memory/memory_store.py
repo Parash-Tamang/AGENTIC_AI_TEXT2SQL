@@ -238,6 +238,7 @@ class MemoryManager:
         # Build initial state using your existing helper
         state = create_initial_state(
             user_query=user_query,
+            user_role=persisted.get("role") or persisted.get("user_role") or "",
             domain_context=persisted.get("domain_context", "general"),
             history=persisted.get("history", []),
             session_id=session_id,

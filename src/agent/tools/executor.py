@@ -161,7 +161,7 @@ def _handle_execute_query(inputs: dict, state: dict) -> dict:
         # Use summary for terminal prints and later state
         rowcount = summary.get("rowcount")
         error = summary.get("error")
-        sample = summary.get("sample_rows") or (summary.get("rows") or [])[:3]
+        sample = summary.get("sample_rows") or (summary.get("rows") or [])
 
         print(f"   🔍 execution_result: rows={rowcount}, error={error}")
         if sample:
@@ -218,6 +218,7 @@ def _handle_fetch_schema(inputs: dict, state: dict) -> list[dict]:
             top_k=inputs.get("top_k", 5),
             schema_name=inputs.get("schema_name"),
             table_name=inputs.get("table_name"),
+            table_names=inputs.get("table_names"),
         )
 
         results = []
@@ -482,11 +483,11 @@ def executor_node(state: dict) -> dict:
             rowcount = result.get("rowcount")
             error = result.get("error")
             sample_rows = result.get("rows") or result.get("sample_rows") or []
-            sample = sample_rows[:3] if isinstance(sample_rows, list) else []
+            sample = sample_rows if isinstance(sample_rows, list) else []
 
             print(f"   🔍 execution_result: rows={rowcount}, error={error}")
             if sample:
-                print(f"      sample_rows: {sample}")
+                print(f"sample_rows: {sample}")
             pretty_log(
                 "executor",
                 state={"generated_sql": sql},
