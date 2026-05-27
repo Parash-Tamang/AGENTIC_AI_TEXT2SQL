@@ -156,7 +156,7 @@ class ExecutionAnalysis(BaseModel):
     )
     error: Optional[str] = Field(default=None, description="Execution error, if any")
     sample_rows: List[Dict[str, Any]] = Field(
-        default_factory=list, description="Up to 5 serialisable sample rows"
+        default_factory=list, description="All serialisable sample rows from executor"
     )
 
 
@@ -294,7 +294,7 @@ def analyze_execution_result(
 
     # sample rows (safe serialisation)
     sample: List[Dict[str, Any]] = []
-    for r in rows[:5]:
+    for r in rows:
         try:
             if isinstance(r, dict):
                 sample.append(

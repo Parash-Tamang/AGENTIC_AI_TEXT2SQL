@@ -25,14 +25,6 @@ async def sql_validation_router(state: Dict[str, Any]) -> str:
     validation = state.get("validation_result", {})
     needs_retry = validation.get("needs_retry", False)
 
-    # If validation produced RBAC-related errors, do not retry — end the flow
-    validation_errors = state.get("validation_errors", [])
-    if validation_errors and any(
-        ("RBAC" in str(e) or "Disallowed" in str(e) or "RBAC violation" in str(e))
-        for e in validation_errors
-    ):
-        return "response"
-
     # only retry if validator explicitly asked for it AND under limit
     if passed is False and needs_retry and retry_count < MAX_RETRIES:
         state["retry_count"] = retry_count + 1

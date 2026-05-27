@@ -352,6 +352,17 @@ def response_generator_node(
     if not user_query:
         return {**state_data, "response_error": "no_user_query"}
 
+    # Hard stop for RBAC denial. Schema fetcher already built the final message,
+    # and we must not let the LLM rewrite or soften it.
+    if state_data.get("permission_denied") and state_data.get("user_facing_response"):
+        final_response = str(state_data.get("user_facing_response", "")).strip()
+        return {
+            **state_data,
+            "user_facing_response": final_response,
+            "response_token_breakdown": {},
+            "view_suggestions_shown": [],
+        }
+
     # ── Read intent from state ────────────────────────────────────────
     intent_data = state_data.get("intent") or {}
     if isinstance(intent_data, str):
