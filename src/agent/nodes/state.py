@@ -200,6 +200,9 @@ class RAGState(BaseModel):
     response_token_breakdown: Dict[str, Any] = Field(default_factory=dict)
     response_error: Optional[str] = None
 
+    # Graph builder output
+    graph_data: Optional[Dict[str, Any]] = None
+
     model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
 
 

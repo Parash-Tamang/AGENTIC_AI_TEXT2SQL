@@ -21,6 +21,7 @@ from src.agent.nodes.sql_validator import sql_validator_node
 from src.agent.tools.executor import executor_node
 from src.agent.nodes.sql_results_validator import sql_post_execution_validator_node
 from src.agent.nodes.generate_response import response_generator_node
+from src.agent.nodes.visualization_agent import visualization_agent_node
 from src.agent.orchestrator.engine import GraphEngine
 from src.agent.memory.session_context import SessionContext, extract_from_state
 from src.agent.nodes.state import create_initial_state
@@ -288,6 +289,19 @@ async def run_chat_pipeline(
                 "execution_analysis": r.get("execution_analysis"),
             },
         ),
+        "visualization": trace_node(
+            "visualization",
+            lambda s: visualization_agent_node(s, viz_llm=llm),
+            input_builder=lambda s: {
+                "execution_result": s.get("execution_result"),
+                "generated_sql": s.get("generated_sql"),
+                "sanitised_schema": s.get("sanitised_schema"),
+                "construct": s.get("construct"),
+            },
+            output_builder=lambda r: {
+                "graph_data": r.get("graph_data"),
+            },
+        ),
         # FIX: response_generator now receives all keys it needs
         "response_generator": trace_node(
             "response_generator",
@@ -299,6 +313,7 @@ async def run_chat_pipeline(
                 "construct": s.get("construct"),  # FIX: was missing
                 "generated_sql": s.get("generated_sql"),
                 "execution_result": s.get("execution_result"),
+                "graph_data": s.get("graph_data"),
                 "execution_analysis": s.get("execution_analysis"),
                 "retrieved_schemas": s.get("retrieved_schemas"),  # FIX: was missing
                 "view_suggestions": s.get("view_suggestions"),  # FIX: was missing

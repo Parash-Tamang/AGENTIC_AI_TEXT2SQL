@@ -15,6 +15,7 @@ GRAPH: dict[str, dict] = {
     "sql_validator": {"router": "sql_validation_router"},
     "executor": {"next": "sql_post_execution_validator"},
     "sql_post_execution_validator": {"router": "validation_router"},
+    "visualization": {"next": "response_generator"},
     "response_generator": {"next": None},
 }
 
@@ -35,6 +36,7 @@ ROUTERS: dict[str, dict[str, str | None]] = {
         "sql_generator": "sql_generator",  # validation_passed False
         "query_refiner": "query_refiner",  # self_rag_retry → full retry
         "response": "response_generator",  # success
+        "visualization": "visualization",  # route to visualization when requested
     },
 }
 

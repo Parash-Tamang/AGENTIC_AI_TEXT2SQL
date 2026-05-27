@@ -127,12 +127,34 @@ Reasoning: Query requests count and aggregation on orders data — clear SQL int
 
 ---
 
+VISUALIZATION DETECTION (only when intent is SQL_QUERY):
+
+When a SQL_QUERY intent is detected, also check for visualization keywords:
+- If the query asks to "show", "plot", "chart", "visualize", "graph" → set graph_type
+- "trend / over time / monthly / yearly / by month"         → graph_type = "line"
+- "compare / rank / top N / by / highest / lowest"          → graph_type = "bar"
+- "distribution / spread / histogram / bins"                → graph_type = "histogram"
+- "relationship / correlation / scatter / by X and Y"       → graph_type = "scatter"
+- "share / proportion / breakdown / percentage / slice"     → graph_type = "pie"
+- No visual keyword present                                 → graph_type = null
+
+Examples:
+- "Show me the sales trend over time" → graph_type = "line"
+- "Compare revenue by product category" → graph_type = "bar"
+- "What is the salary distribution?" → graph_type = "histogram"
+- "Plot customer age vs purchase amount" → graph_type = "scatter"
+- "Show market share breakdown by region" → graph_type = "pie"
+- "How many orders per day?" → graph_type = null (no visualization hint)
+
+---
+
 OUTPUT FORMAT (STRICT JSON):
 {
   "Intent": "SQL_QUERY" | "SUMMARIZE" | "EXPLAIN" | "GREETING" | "OUT_OF_SCOPE",
   "Confidence": float (0.0–1.0),
   "RouteTo": "TaskClassifier" | "Summarizer" | "Explainer" | "DirectResponse" | "Rejection",
-  "Reasoning": "<One-sentence explanation>"
+  "Reasoning": "<One-sentence explanation>",
+  "GraphType": "bar" | "line" | "scatter" | "histogram" | "pie" | null
 }
 
 ---
@@ -143,4 +165,10 @@ Instructions:
 - If intent is ambiguous between SQL_QUERY and EXPLAIN, prefer EXPLAIN only if a prior SQL exists.
 - Confidence must reflect how clearly the intent was identified.
 - Respond strictly in the specified JSON format only.
+
+IMPORTANT: "bar chart", "pie chart", "graph", "plot", "visualize" are NOT
+SQL concept gaps. Visualization is handled by a separate agent after SQL
+execution. Never flag chart types as concept_gaps or critical_issues.
+Only validate that the SQL correctly retrieves the data needed to answer
+the question.
 """

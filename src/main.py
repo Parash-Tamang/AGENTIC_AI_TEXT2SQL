@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 import logging
 
 from src.knowledgebase.controller.knowledgebase_controller import router as kb_router
@@ -65,6 +66,9 @@ app.add_middleware(
 
 app.include_router(kb_router)
 app.include_router(chat_router)
+
+# Serve assets (charts/images) as static files at /assets/*
+app.mount("/assets", StaticFiles(directory="assets"), name="assets")
 
 
 # ── Exception Handlers ────────────────────────────────────────

@@ -2,6 +2,8 @@
 
 from typing import Any, Dict
 
+from src.agent.nodes.visualization_agent import should_visualize
+
 
 async def intent_router(state: Dict[str, Any]) -> str:
     """Route after intent_classifier.
@@ -61,6 +63,16 @@ async def validation_router(state: Dict[str, Any]) -> str:
     if self_rag_retry and retry_count < MAX_RETRIES:
         state["retry_count"] = retry_count + 1
         return "query_refiner"
+
+    # If validation passed (or nothing fatal happened) and the intent
+    # indicates a visualization should be produced, route to the
+    # visualization node which leads to the response node afterwards.
+    try:
+        if should_visualize(state):
+            return "visualization"
+    except Exception:
+        # swallow errors here to avoid breaking routing; fall through
+        pass
 
     return "response"  # engine maps → response_generator
 
