@@ -363,4 +363,249 @@ def filter_has_column(filters: Dict[str, Any], column_name: str) -> bool:
     return False
 
 
-__all__ = ["extract_filters_from_sql", "flatten_filters", "filter_has_column"]
+# ============================================================================
+# RBAC Permission Validation (uses permissions.json)
+# ============================================================================
+
+import json
+from pathlib import Path
+
+
+class PermissionValidator:
+    """Validates extracted filters against role-based access control rules.
+
+    Uses permissions.json to enforce:
+    - Table-level access for roles
+    - Required filter columns (id, enum types)
+    - Allowed filter values (for enum filters)
+
+    Example:
+        validator = PermissionValidator()
+        is_allowed = validator.validate_access(
+            role="customer",
+            table="SalesLT.Customer",
+            filters={"CustomerID": [{"operator": "=", "value": 42}]}
+        )
+    """
+
+    def __init__(self, permissions_path: Optional[str] = None):
+        """Initialize with permissions JSON file path.
+
+        Args:
+            permissions_path: Path to permissions.json. If None, searches for it
+                            in common locations (repo root, src/, etc).
+        """
+        self.permissions_path = self._find_permissions_file(permissions_path)
+        self.permissions = self._load_permissions()
+        logger.info("✅ PermissionValidator initialized with %s", self.permissions_path)
+
+    def _find_permissions_file(self, explicit_path: Optional[str] = None) -> str:
+        """Find permissions.json in common locations."""
+        if explicit_path and Path(explicit_path).exists():
+            return explicit_path
+
+        search_paths = [
+            Path.cwd() / "permissions.json",  # Current directory
+            Path(__file__).parent.parent.parent / "permissions.json",  # Repo root
+            Path(__file__).parent.parent / "permissions.json",  # src/
+        ]
+
+        for path in search_paths:
+            if path.exists():
+                logger.info("Found permissions.json at: %s", path)
+                return str(path)
+
+        raise FileNotFoundError(
+            "permissions.json not found. Please ensure it exists in repo root or src/"
+        )
+
+    def _load_permissions(self) -> Dict[str, Any]:
+        """Load and parse permissions.json."""
+        try:
+            with open(self.permissions_path, "r") as f:
+                return json.load(f)
+        except Exception as exc:
+            logger.error("Failed to load permissions.json: %s", exc)
+            raise
+
+    def validate_access(
+        self,
+        role: str,
+        table: str,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Validate if role can access table with given filters.
+
+        Args:
+            role: Role name (e.g., "customer", "sales", "admin")
+            table: Table name (e.g., "SalesLT.Customer")
+            filters: Extracted filters dict from extract_filters_from_sql()
+
+        Returns:
+            {
+                "allowed": bool,
+                "reason": str,
+                "required_filters": list,
+                "missing_filters": list,
+                "invalid_values": list,
+                "access_level": str  # "unrestricted" or "filtered"
+            }
+        """
+        result = {
+            "allowed": False,
+            "reason": "",
+            "required_filters": [],
+            "missing_filters": [],
+            "invalid_values": [],
+            "access_level": None,
+        }
+
+        # Check if role exists
+        if role not in self.permissions.get("permissions", {}):
+            result["reason"] = f"Role '{role}' not found in permissions"
+            return result
+
+        role_perms = self.permissions["permissions"][role]
+
+        # Check if table is accessible to role
+        if table not in role_perms:
+            result["reason"] = f"Role '{role}' has no access to table '{table}'"
+            return result
+
+        table_config = role_perms[table]
+        access_level = table_config.get("access_level", "unrestricted")
+        result["access_level"] = access_level
+
+        # If unrestricted, no filter validation needed
+        if access_level == "unrestricted":
+            result["allowed"] = True
+            result["reason"] = f"Role '{role}' has unrestricted access to '{table}'"
+            return result
+
+        # Filtered access: validate required filters
+        required = table_config.get("required_filters", [])
+        result["required_filters"] = [f["column"] for f in required]
+
+        filters = filters or {}
+        missing = []
+        invalid = []
+
+        for req_filter in required:
+            col_name = req_filter["column"]
+            filter_type = req_filter.get("filter_type", "id")
+            allowed_values = req_filter.get("values")
+
+            # Check if required column is present in filters
+            if col_name not in filters:
+                missing.append(col_name)
+                continue
+
+            # Validate filter values (for enum filters)
+            if filter_type == "enum" and allowed_values:
+                col_filters = filters.get(col_name, [])
+                for f in col_filters:
+                    val = f.get("value")
+                    if isinstance(val, list):
+                        # IN clause: check all values
+                        for v in val:
+                            if str(v) not in [str(av) for av in allowed_values]:
+                                invalid.append(
+                                    {
+                                        "column": col_name,
+                                        "value": v,
+                                        "reason": f"Value not in allowed: {allowed_values}",
+                                    }
+                                )
+                    else:
+                        # Single value
+                        if str(val) not in [str(av) for av in allowed_values]:
+                            invalid.append(
+                                {
+                                    "column": col_name,
+                                    "value": val,
+                                    "reason": f"Value not in allowed: {allowed_values}",
+                                }
+                            )
+
+        result["missing_filters"] = missing
+        result["invalid_values"] = invalid
+        result["allowed"] = len(missing) == 0 and len(invalid) == 0
+
+        if result["allowed"]:
+            result["reason"] = (
+                f"✅ Role '{role}' can access '{table}' with valid filters"
+            )
+        else:
+            if missing:
+                result["reason"] = f"❌ Missing required filters: {missing}"
+            if invalid:
+                result["reason"] = (
+                    f"❌ Invalid filter values: {[i['column'] for i in invalid]}"
+                )
+
+        return result
+
+    def validate_sql_access(
+        self,
+        role: str,
+        sql: str,
+        table: str,
+        dialect: str = "tsql",
+    ) -> Dict[str, Any]:
+        """Extract filters from SQL and validate access in one call.
+
+        Args:
+            role: Role name
+            sql: SQL query string
+            table: Table being queried
+            dialect: SQL dialect
+
+        Returns:
+            Same format as validate_access()
+        """
+        filters = extract_filters_from_sql(sql, dialect=dialect)
+        return self.validate_access(role=role, table=table, filters=filters)
+
+
+def enforce_rbac(
+    role: str,
+    table: str,
+    filters: Dict[str, Any],
+    permissions_path: Optional[str] = None,
+) -> tuple[bool, str]:
+    """Convenience function: validate access and return (allowed, reason).
+
+    Args:
+        role: Role name
+        table: Table name
+        filters: Extracted filters
+        permissions_path: Optional path to permissions.json
+
+    Returns:
+        (allowed: bool, reason: str)
+
+    Example:
+        allowed, reason = enforce_rbac(
+            role="customer",
+            table="SalesLT.Customer",
+            filters=extracted_filters
+        )
+        if not allowed:
+            raise PermissionError(reason)
+    """
+    try:
+        validator = PermissionValidator(permissions_path)
+        result = validator.validate_access(role, table, filters)
+        return result["allowed"], result["reason"]
+    except Exception as exc:
+        logger.error("RBAC validation error: %s", exc)
+        return False, f"RBAC check failed: {exc}"
+
+
+__all__ = [
+    "extract_filters_from_sql",
+    "flatten_filters",
+    "filter_has_column",
+    "PermissionValidator",
+    "enforce_rbac",
+]

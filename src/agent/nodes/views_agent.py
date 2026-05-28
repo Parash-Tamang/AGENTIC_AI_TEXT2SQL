@@ -469,7 +469,7 @@ def views_fetcher_node(
         }
 
     # ── Parallel fetch ────────────────────────────────────────────────────────
-    workers = max_workers or min(len(queries), 4)
+    workers = 1  # max_workers or min(len(queries), 4)
     logger.info(f"Fetching views for {len(queries)} queries with {workers} workers")
 
     views_result = ViewsResult()
