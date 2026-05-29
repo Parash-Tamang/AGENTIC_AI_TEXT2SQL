@@ -11,7 +11,7 @@ import json
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Optional
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 FilterType = Literal["id", "enum", "none"]
 
@@ -20,7 +20,15 @@ class ColumnPermission(BaseModel):
     """Schema for a single column permission constraint."""
 
     filter: FilterType
-    values: Optional[list[str]] = None
+    values: Optional[list[str | int]] = None
+
+    @field_validator("values", mode="before")
+    @classmethod
+    def coerce_scalar_to_list(cls, v: object) -> object:
+        """Wrap a bare scalar (e.g. "2" or 2) into a single-element list."""
+        if v is not None and not isinstance(v, list):
+            return [v]
+        return v
 
 
 class TablePermission(BaseModel):
@@ -135,3 +143,9 @@ def _load_rbac_json() -> dict:
 def get_permission_context(role: str) -> PermissionContext:
     """Get PermissionContext for a role by reading permissions.json."""
     return build_permission_context(role, _load_rbac_json())
+
+
+# print(get_permission_context("customer").allowed_tables())
+# print(get_permission_context("customer").is_table_allowed("SalesLT.Customer"))
+# print(get_permission_context("customer").mandatory_filters("SalesLT.Customer"))
+# print(get_permission_context("customer").allowed_columns("SalesLT.Customer"))

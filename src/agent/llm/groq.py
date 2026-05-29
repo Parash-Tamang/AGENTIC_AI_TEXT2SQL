@@ -9,12 +9,15 @@ from typing import Optional, List, Dict
 
 from src.agent.observability import log_llm_call
 
+# Groq free tier limits — adjust to your plan
+_RETRY_AFTER_DEFAULT = 30  # seconds to wait on 429 if header is missing
+_BASE_BACKOFF = 1  # seconds for non-429 errors
+
 
 class GroqLLM(BaseLLM):
     def __init__(
         self, api_key: str, model: str, temperature: float = 0.1, max_retries: int = 3
     ):
-        """Initialize Groq LLM with error handling for version conflicts."""
         old_http_proxy = os.environ.pop("HTTP_PROXY", None)
         old_https_proxy = os.environ.pop("HTTPS_PROXY", None)
         old_all_proxy = os.environ.pop("ALL_PROXY", None)
@@ -37,7 +40,6 @@ class GroqLLM(BaseLLM):
                 "api_key" in error_msg.lower() or "authentication" in error_msg.lower()
             ):
                 print(f"[ERROR] Groq API key error: {e}")
-                print("[INFO] Please set GROQ_API_KEY environment variable")
                 raise
             else:
                 raise
@@ -53,59 +55,75 @@ class GroqLLM(BaseLLM):
         self.temperature = temperature
         self.max_retries = max_retries
 
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _retry_after(self, e: APIStatusError) -> float:
+        """
+        Extract wait time from Retry-After header, or fall back to default.
+        Groq usually sends 'retry-after' (seconds) on 429 responses.
+        """
+        headers = getattr(e, "response", None)
+        headers = getattr(headers, "headers", {}) if headers else {}
+        retry_after = headers.get("retry-after") or headers.get("Retry-After")
+        if retry_after:
+            try:
+                return float(retry_after)
+            except ValueError:
+                pass
+        return _RETRY_AFTER_DEFAULT
+
+    def _build_messages(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        memory: Optional[List[Dict[str, str]]],
+    ) -> list:
+        messages = [{"role": "system", "content": system_prompt}]
+        for mem_item in memory or []:
+            role = mem_item.get("role", "assistant").lower()
+            if "user" in role:
+                role = "user"
+            else:
+                role = "assistant"
+            messages.append({"role": role, "content": mem_item.get("content", "")})
+        messages.append({"role": "user", "content": user_prompt})
+        return messages
+
+    # ------------------------------------------------------------------
+    # Main generate
+    # ------------------------------------------------------------------
+
     def generate(
         self,
         system_prompt: str,
         user_prompt: str,
         memory: Optional[List[Dict[str, str]]] = None,
         tools: Optional[List[Dict[str, str]]] = None,
-        json_mode: bool = False,  # NEW: pass True to force JSON output
-        response_format: Optional[Dict] = None,  # NEW: custom response format
+        json_mode: bool = False,
+        response_format: Optional[Dict] = None,
     ) -> str:
-        """
-        Generate a response from Groq.
-
-        Args:
-            json_mode: When True, sets response_format={"type": "json_object"}.
-                       The model is FORCED to return valid JSON — no prose, no markdown.
-                       Use this for any node that expects a JSON response (refiner,
-                       validator, intent classifier, etc).
-                       NOTE: your system prompt must mention "JSON" at least once
-                       or Groq will reject the request with a 400 error.
-        """
         last_error = None
+        messages = self._build_messages(system_prompt, user_prompt, memory)
 
         for attempt in range(self.max_retries):
             try:
                 started_at = time.perf_counter()
-                messages = [{"role": "system", "content": system_prompt}]
 
-                if memory:
-                    for mem_item in memory:
-                        mem_role = mem_item.get("role", "assistant")
-                        if "user" in mem_role.lower():
-                            mem_role = "user"
-                        elif (
-                            "bot" in mem_role.lower() or "assistant" in mem_role.lower()
-                        ):
-                            mem_role = "assistant"
-                        else:
-                            mem_role = "assistant"
-                        messages.append(
-                            {"role": mem_role, "content": mem_item.get("content", "")}
-                        )
-
-                messages.append({"role": "user", "content": user_prompt})
-
-                kwargs = {
+                kwargs: Dict = {
                     "model": self.model,
                     "messages": messages,
                     "temperature": self.temperature,
                 }
 
-                # JSON mode — forces valid JSON output, no prose or markdown
+                # JSON mode — default to {"type": "json_object"} if no
+                # custom format supplied.  Caller must mention "JSON" in
+                # the system prompt or Groq returns a 400.
                 if json_mode:
-                    kwargs["response_format"] = response_format
+                    kwargs["response_format"] = response_format or {
+                        "type": "json_object"
+                    }
 
                 if tools:
                     kwargs["tools"] = tools
@@ -113,9 +131,8 @@ class GroqLLM(BaseLLM):
 
                 response = self.client.chat.completions.create(**kwargs)
                 message = response.choices[0].message
-                # print(message)
 
-                # Native tool call response
+                # Native tool-call response
                 if message.tool_calls:
                     tool_call = message.tool_calls[0]
                     output = json.dumps(
@@ -163,8 +180,7 @@ class GroqLLM(BaseLLM):
                 return output
 
             except APIStatusError as e:
-                print(f"\n❌ Groq APIStatusError (attempt {attempt + 1}):")
-                traceback.print_exc()
+                last_error = e
                 log_llm_call(
                     provider="groq",
                     model=self.model,
@@ -173,14 +189,35 @@ class GroqLLM(BaseLLM):
                     memory=memory,
                     tools=tools,
                     error=e,
-                    extra={"attempt": attempt + 1},
+                    extra={"attempt": attempt + 1, "status_code": e.status_code},
                 )
-                last_error = e
-                time.sleep(1)
+
+                if e.status_code == 429:
+                    # Rate limited — respect Retry-After, don't burn attempts
+                    wait = self._retry_after(e)
+                    print(
+                        f"[429] Rate limited. Waiting {wait}s before retry "
+                        f"(attempt {attempt + 1}/{self.max_retries})"
+                    )
+                    time.sleep(wait)
+
+                elif e.status_code in (400, 401, 403):
+                    # Non-retryable — fail immediately
+                    print(f"[{e.status_code}] Non-retryable error: {e}")
+                    raise
+
+                else:
+                    # 5xx or other — exponential back-off
+                    wait = _BASE_BACKOFF * (2**attempt)
+                    print(
+                        f"[{e.status_code}] Server error. Waiting {wait}s "
+                        f"(attempt {attempt + 1}/{self.max_retries})"
+                    )
+                    traceback.print_exc()
+                    time.sleep(wait)
 
             except Exception as e:
-                print(f"\n❌ Groq error (attempt {attempt + 1}):")
-                traceback.print_exc()
+                last_error = e
                 log_llm_call(
                     provider="groq",
                     model=self.model,
@@ -191,7 +228,14 @@ class GroqLLM(BaseLLM):
                     error=e,
                     extra={"attempt": attempt + 1},
                 )
-                last_error = e
-                time.sleep(1)
+                wait = _BASE_BACKOFF * (2**attempt)
+                print(
+                    f"[ERROR] Groq error (attempt {attempt + 1}): {e}. "
+                    f"Waiting {wait}s"
+                )
+                traceback.print_exc()
+                time.sleep(wait)
 
-        raise RuntimeError(f"Groq LLM failed: {last_error}")
+        raise RuntimeError(
+            f"Groq LLM failed after {self.max_retries} attempts: {last_error}"
+        )

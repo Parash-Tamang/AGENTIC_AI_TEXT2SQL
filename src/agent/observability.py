@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+import os
 import sys
 import time
 import uuid
@@ -198,10 +199,19 @@ def _sanitize(value: Any, depth: int = 0, max_depth: int = 5) -> Any:
             return str(value)
 
     if isinstance(value, dict):
-        return {
-            str(key): _sanitize(item, depth + 1, max_depth)
-            for key, item in value.items()
-        }
+        # Preserve full text for well-known hint fields so logs show the whole hint
+        full_text_keys = {"hint", "suggested_fix", "full_hint", "reasoning"}
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            try:
+                k = str(key)
+            except Exception:
+                k = str(key)
+            if k.lower() in full_text_keys and isinstance(item, str):
+                out[k] = item
+            else:
+                out[k] = _sanitize(item, depth + 1, max_depth)
+        return out
 
     if isinstance(value, (list, tuple, set)):
         items = list(value)
@@ -245,6 +255,17 @@ def _workflow_logger() -> logging.Logger:
     file_handler = logging.FileHandler(_WORKFLOW_LOG_FILE, encoding="utf-8")
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
+
+    # If the user requests structured-only logs, raise the global log level
+    # so module-level INFO logs (which often duplicate workflow events) are
+    # suppressed from the console. Enable by setting WORKFLOW_STRUCTURED_ONLY=1
+    structured_only = os.getenv("WORKFLOW_STRUCTURED_ONLY", "0").lower()
+    if structured_only in ("1", "true", "yes"):
+        root = logging.getLogger()
+        try:
+            root.setLevel(logging.WARNING)
+        except Exception:
+            pass
 
     logger._structured_configured = True  # type: ignore[attr-defined]
     return logger

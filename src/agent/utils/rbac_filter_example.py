@@ -20,7 +20,7 @@ def example_customer_own_profile():
     print("Example 1: Customer accessing own profile")
     print("=" * 70)
 
-    sql = "SELECT CustomerID, FirstName, LastName FROM SalesLT.Customer WHERE CustomerID = 123"
+    sql = "SELECT CustomerID, FirstName, LastName FROM SalesLT.Customer WHERE CustomerID = 101"
     role = "customer"
     table = "SalesLT.Customer"
 
@@ -37,6 +37,7 @@ def example_customer_own_profile():
     print(f"  Reason: {result['reason']}")
     print(f"  Access Level: {result['access_level']}")
     print(f"  Required Filters: {result['required_filters']}")
+    exit(0)
 
 
 def example_customer_missing_filter():

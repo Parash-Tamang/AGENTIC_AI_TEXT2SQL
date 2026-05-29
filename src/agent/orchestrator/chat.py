@@ -17,6 +17,7 @@ from src.agent.nodes.decomposition import query_decomposer
 from src.agent.nodes.views_agent import views_fetcher_node
 from src.agent.nodes.schema_agent import schema_fetcher_node
 from src.agent.nodes.sql_generator import sql_generator_node
+from src.agent.nodes.rbac_enforcer import rbac_enforcer_node
 from src.agent.nodes.sql_validator import sql_validator_node
 from src.agent.tools.executor import executor_node
 from src.agent.nodes.sql_results_validator import sql_post_execution_validator_node
@@ -237,6 +238,22 @@ async def run_chat_pipeline(
                 "hallucinated_tables": r.get("hallucinated_tables"),
             },
         ),
+        "rbac_enforcer": trace_node(
+            "rbac_enforcer",
+            rbac_enforcer_node,
+            input_builder=lambda s: {
+                "generated_sql": s.get("generated_sql"),
+                "allowed_tables": s.get("allowed_tables"),
+                "mandatory_filters": s.get("mandatory_filters"),
+            },
+            output_builder=lambda r: {
+                "generated_sql": r.get("generated_sql"),
+                "permission_denied": r.get("permission_denied"),
+                "user_facing_response": r.get("user_facing_response"),
+                "validation_result": r.get("validation_result"),
+                "rbac_enforced_filters": r.get("rbac_enforced_filters"),
+            },
+        ),
         "sql_validator": trace_node(
             "sql_validator",
             lambda s: sql_validator_node(llm, s),
@@ -350,8 +367,12 @@ async def run_chat_pipeline(
             final_state.get("turn_number") or final_state.get("turn_count") or 1
         )
 
+        # Remove runtime-only objects before tracing / returning state.
+        final_state.pop("prompt_client", None)
+
         finish_request_trace(final_state=final_state, status="success")
         return final_state
     except Exception as exc:
+        initial_state.pop("prompt_client", None)
         finish_request_trace(final_state=initial_state, error=str(exc), status="error")
         raise

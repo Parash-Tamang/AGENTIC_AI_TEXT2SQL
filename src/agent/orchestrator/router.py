@@ -36,6 +36,24 @@ async def sql_validation_router(state: Dict[str, Any]) -> str:
     return "results_validator"
 
 
+async def rbac_router(state: Dict[str, Any]) -> str:
+    if state.get("permission_denied"):
+        return "response"
+
+    if state.get("validation_passed") is True:
+        return "sql_validator"
+
+    validation = state.get("validation_result", {})
+    needs_retry = (
+        validation.get("needs_retry", False) if isinstance(validation, dict) else False
+    )
+
+    if needs_retry:
+        return "sql_generator"
+
+    return "sql_validator"
+
+
 async def validation_router(state: Dict[str, Any]) -> str:
     """Route after sql_post_execution_validator.
 
@@ -79,6 +97,7 @@ async def validation_router(state: Dict[str, Any]) -> str:
 
 ROUTER_FNS = {
     "intent_router": intent_router,
+    "rbac_router": rbac_router,
     "sql_validation_router": sql_validation_router,
     "validation_router": validation_router,
 }

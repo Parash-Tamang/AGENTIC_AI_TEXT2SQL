@@ -52,6 +52,7 @@ class IntentData(BaseModel):
     confidence: float
     output_format: Optional[str] = None
     graph_type: Optional[str] = None
+    excel_marker: bool = False
     reasoning: str
 
 
@@ -195,6 +196,7 @@ class RAGState(BaseModel):
     execution_issues: List[str] = Field(default_factory=list)
     # Optional structural validation baked into state
     validation_structural: Optional[Dict[str, Any]] = None
+    excel: Dict[str, Any] = Field(default_factory=dict)
     # Response node outputs
     user_facing_response: Optional[str] = None
     response_token_breakdown: Dict[str, Any] = Field(default_factory=dict)
@@ -264,6 +266,28 @@ def create_initial_state(
     except KeyError as exc:
         raise ValueError(f"Unknown role: {user_role}") from exc
 
+    # Derive RBAC runtime fields from permission context so downstream nodes
+    # (sql_generator / rbac_enforcer) always have these keys populated.
+    allowed_tables = permission_context.allowed_tables()
+    mandatory_filters: Dict[str, Dict[str, Any]] = {}
+    column_whitelist: Dict[str, Optional[List[str]]] = {}
+
+    for table_name in allowed_tables:
+        table_filters: Dict[str, Any] = {}
+        for col_name, col_perm in permission_context.mandatory_filters(
+            table_name
+        ).items():
+            if hasattr(col_perm, "model_dump"):
+                table_filters[col_name] = col_perm.model_dump()
+            else:
+                table_filters[col_name] = {
+                    "filter": getattr(col_perm, "filter", "id"),
+                    "values": getattr(col_perm, "values", None),
+                }
+
+        mandatory_filters[table_name] = table_filters
+        column_whitelist[table_name] = permission_context.allowed_columns(table_name)
+
     state = RAGState(
         user_query=user_query,
         domain_context=domain_context,
@@ -273,6 +297,10 @@ def create_initial_state(
         refined_query=user_query,
         user_role=user_role,
         permission_context=permission_context,
+        allowed_tables=allowed_tables,
+        denied_tables=[],
+        mandatory_filters=mandatory_filters,
+        column_whitelist=column_whitelist,
         db_type=connection_data.get("db_type"),
         connection_id=connection_data.get("connection_id"),
         user_id=connection_data.get("user_id"),

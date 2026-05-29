@@ -546,6 +546,7 @@ def sql_generator_node(
     # mandatory_filters: column structure only — values are stripped so the
     # LLM uses the user's intent. The RBAC enforcer locks values after validation.
     mandatory_filters: dict[str, dict] = state.get("mandatory_filters", {})
+    authorization_policy: dict[str, Any] = state.get("authorization_policy") or {}
 
     if not user_query:
         return _fail("No constructed query in state")
@@ -579,7 +580,14 @@ def sql_generator_node(
     # The LLM must include these columns in WHERE using the user's intent value.
     # The RBAC enforcer will lock the actual permitted value after validation.
     if mandatory_filters:
-        logger.info(f"Injecting {len(mandatory_filters)} mandatory filter requirements")
+        # Build human-readable list of mandatory filter columns for logging
+        mf_list = []
+        for table, filters in mandatory_filters.items():
+            for col, meta in (filters or {}).items():
+                mf_list.append(f"{table}.{col}({meta.get('filter')})")
+        logger.info(
+            f"Injecting {len(mandatory_filters)} mandatory filter requirements — {mf_list}"
+        )
         base_payload["MandatoryFilters"] = {
             table: {
                 col: {"filter": meta.get("filter")} for col, meta in filters.items()
@@ -587,13 +595,59 @@ def sql_generator_node(
             for table, filters in mandatory_filters.items()
         }
 
+    if authorization_policy and not state.get("validation_passed"):
+        logger.info(
+            "Injecting authorization_policy into generator prompt — tables: %s",
+            list(authorization_policy.get("tables", {}).keys()),
+        )
+        policy_lines = [
+            "=== AUTHORIZATION POLICY (hard constraint, highest priority) ===",
+            "You MUST include the following WHERE conditions in the SQL.",
+            "Use the real base column name. Never alias these columns.",
+            "Do not omit, substitute, or move them to a subquery.",
+            "",
+        ]
+        for table, cols in authorization_policy["tables"].items():
+            policy_lines.append(f"Table: {table}")
+            for col, rule in cols.items():
+                vals = rule["values"]
+                ftype = rule["filter_type"]
+                policy_lines.append(f"  Column     : {col}")
+                policy_lines.append(f"  Type       : {ftype}")
+                policy_lines.append(f"  Must equal : {vals}")
+            policy_lines.append("")
+        policy_lines.append("=== END AUTHORIZATION POLICY ===")
+        policy_text = "\n".join(policy_lines)
+        # Log the full policy text (escaped newlines) for clarity in logs
+        try:
+            policy_log = policy_text.replace("\n", "\\n")
+        except Exception:
+            policy_log = str(policy_text)
+        logger.info(f"Authorization policy injected into prompt: {policy_log}")
+        # Formal immutable policy token expected by the system prompt
+        base_payload["AUTHORIZATION_POLICY_IMMUTABLE"] = policy_text
+    else:
+        logger.info(
+            "Skipping authorization_policy injection — already verified by RBAC."
+        )
+        authorization_policy = {}
+
     retry_feedback = state.get("retry_feedback")
+    # Persisted retry count from the orchestrator determines the starting
+    # attempt number for this node. This keeps attempt numbering stable
+    # across pipeline retries so logs and payloads reflect cumulative attempts.
+    starting_retry_count = state.get("retry_count", 0)
+    starting_attempt = starting_retry_count + 1
+
     if retry_feedback and isinstance(retry_feedback, dict):
         failed_sql = retry_feedback.get("failed_sql", "")
         hint = retry_feedback.get("hint", "")
         issues = retry_feedback.get("issues", [])
         reasoning = retry_feedback.get("reasoning", "")
-        attempt = retry_feedback.get("attempt", 1)
+        # Use the orchestrator-managed attempt when available, otherwise
+        # fall back to the persisted attempt in retry_feedback.
+        attempt = retry_feedback.get("attempt", starting_attempt)
+        retry_auth_policy = retry_feedback.get("authorization_policy", {})
 
         if failed_sql:
             base_payload["RetryFeedback"] = {
@@ -602,6 +656,9 @@ def sql_generator_node(
                 "ValidationIssues": issues,
                 "Reasoning": reasoning,
                 "SuggestedFix": hint,
+                "AUTHORIZATION_POLICY_IMMUTABLE": retry_auth_policy
+                or authorization_policy
+                or {},
                 "Instruction": (
                     "Your previous SQL was rejected. "
                     "You MUST address every issue listed above. "
@@ -609,14 +666,20 @@ def sql_generator_node(
                     "full schema compliance."
                 ),
             }
+            # Log the full hint so debugging shows the entire suggested_fix
+            try:
+                hint_safe = hint.replace("\n", "\\n")
+            except Exception:
+                hint_safe = str(hint)
             logger.info(
-                f"Retry feedback injected — attempt={attempt}, hint={hint[:80]}"
+                f"Retry feedback injected — attempt={attempt}, hint={hint_safe}"
             )
 
     user_prompt = json.dumps(base_payload, ensure_ascii=False)
     system_prompt = resolve_system_prompt(state, "sql_generator", SQL_GENERATION_SYSTEM)
     prompt_tokens = _count_tokens(system_prompt + user_prompt)
-    logger.info(f"Prompt tokens (attempt 1): {prompt_tokens}")
+    # Report the cumulative attempt number derived from orchestrator state
+    logger.info(f"Prompt tokens (attempt {starting_attempt}): {prompt_tokens}")
 
     # ── retry loop ────────────────────────────────────────────────────────────
 
@@ -626,8 +689,12 @@ def sql_generator_node(
     hallucinated_cols: list[str] = []
     raw: str = ""
 
-    for attempt in range(MAX_RETRIES + 1):
-        logger.info(f"LLM attempt {attempt + 1}/{MAX_RETRIES + 1}")
+    for local_try in range(MAX_RETRIES + 1):
+        # Map local retry index to cumulative attempt number
+        current_attempt = starting_retry_count + local_try + 1
+        logger.info(
+            f"LLM attempt {current_attempt}/{starting_retry_count + MAX_RETRIES + 1}"
+        )
 
         try:
             response_format = {
@@ -645,13 +712,13 @@ def sql_generator_node(
             )
             logger.debug(f"Raw LLM output (first 500):\n{raw[:500]}")
         except Exception as exc:
-            logger.error(f"LLM call failed on attempt {attempt + 1}: {exc}")
-            if attempt == MAX_RETRIES:
+            logger.error(f"LLM call failed on attempt {current_attempt}: {exc}")
+            if local_try == MAX_RETRIES:
                 return _fail("LLM call failed after all retries", str(exc))
             continue
 
         if not raw or not raw.strip():
-            if attempt == MAX_RETRIES:
+            if local_try == MAX_RETRIES:
                 return _fail(
                     "LLM returned empty response — prompt may exceed context window",
                     f"prompt_tokens={prompt_tokens}",
@@ -664,8 +731,8 @@ def sql_generator_node(
             else:
                 result = _parse_llm_json(raw)
         except json.JSONDecodeError as exc:
-            logger.error(f"JSON parse failed on attempt {attempt + 1}: {exc}")
-            if attempt == MAX_RETRIES:
+            logger.error(f"JSON parse failed on attempt {current_attempt}: {exc}")
+            if local_try == MAX_RETRIES:
                 return _fail(
                     "LLM response was not valid JSON after all retries", str(exc)
                 )
@@ -673,7 +740,7 @@ def sql_generator_node(
 
         sql = result.get("sql", "").strip()
         if not sql:
-            if attempt == MAX_RETRIES:
+            if local_try == MAX_RETRIES:
                 return _fail("LLM returned empty sql field after all retries")
             continue
 
@@ -689,16 +756,16 @@ def sql_generator_node(
         logger.debug(f"Detected hallucinated_columns={hallucinated_cols}")
 
         if not hallucinated_tables and not hallucinated_cols:
-            logger.info(f"No hallucinations detected on attempt {attempt + 1}.")
+            logger.info(f"No hallucinations detected on attempt {current_attempt}.")
             break
 
         if hallucinated_tables:
             logger.warning(
-                f"Attempt {attempt + 1}: hallucinated tables: {hallucinated_tables}"
+                f"Attempt {current_attempt}: hallucinated tables: {hallucinated_tables}"
             )
         if hallucinated_cols:
             logger.warning(
-                f"Attempt {attempt + 1}: hallucinated columns: {hallucinated_cols}"
+                f"Attempt {current_attempt}: hallucinated columns: {hallucinated_cols}"
             )
 
         # ── SQLCoder refiner (first-line fix before Llama retry) ─────────────
@@ -775,6 +842,7 @@ def sql_generator_node(
         "sql_errors": [],
         "hallucinated_tables": hallucinated_tables,
         "hallucinated_columns": hallucinated_cols,
+        "authorization_policy": authorization_policy,
         # rbac_enforced_filters is NOT set here — rbac_enforcer_node sets it
         # after validation passes. Generator never touches RBAC values.
     }

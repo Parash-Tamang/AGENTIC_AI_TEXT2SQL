@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -33,6 +34,10 @@ def pretty_log(
     Fields shown (when available): timestamp, label, user_query, route/intent,
     generated_sql, status, token breakdown, latency_ms, key state fields.
     """
+    # Respect environment toggle to disable duplicate human-readable summaries
+    enabled = os.getenv("WORKFLOW_SUMMARY_LOGS", "1").lower()
+    if enabled in ("0", "false", "no"):
+        return
     ts = datetime.now().isoformat(timespec="seconds")
     lines = []
     lines.append("---")

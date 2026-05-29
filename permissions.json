@@ -14,7 +14,7 @@
           {
             "column": "CustomerID",
             "filter_type": "id",
-            "values": null
+            "values": "20"
           }
         ]
       },
@@ -25,7 +25,7 @@
           {
             "column": "CustomerID",
             "filter_type": "id",
-            "values": null
+            "values": ["1"]
           },
           {
             "column": "Status",

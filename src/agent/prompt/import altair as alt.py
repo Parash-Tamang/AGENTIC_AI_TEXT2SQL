@@ -1,14 +1,22 @@
 import altair as alt
-from vega_datasets import data
+import pandas as pd
 
-stocks = data.stocks()
-
-chart = (
-    alt.Chart(stocks)
-    .mark_bar()
-    .encode(x="date:T", y="price:Q", color="symbol:N")
-    .properties(width=700, height=400, title="Stock Prices Over Time")
+df = pd.DataFrame(
+    {
+        "Category": ["Health", "Roads", "Power", "Education"],
+        "Revenue": [1200, 900, 600, 300],
+    }
 )
 
-# Save as PNG
-chart.save("stocks_chart.svg")
+chart = (
+    alt.Chart(df)
+    .mark_arc()
+    .encode(
+        theta=alt.Theta("Revenue:Q"),
+        color=alt.Color("Category:N"),
+        tooltip=["Category", "Revenue"],
+    )
+    .properties(width=500, height=400, title="Revenue by Category")
+)
+
+chart.save("pie_chart.png")

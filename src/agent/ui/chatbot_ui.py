@@ -209,14 +209,14 @@ def display_response_graph(graph_data: Optional[Dict]) -> None:
                 st.metric(label=title, value=value)
 
         # Display PNG image
-        png_bytes = graph_data.get("png_bytes")
-        if png_bytes:
+        image_base64 = graph_data.get("image_base64") or graph_data.get("png_bytes")
+        if image_base64:
             try:
                 # If it's a base64 string, decode it
-                if isinstance(png_bytes, str):
-                    image_data = base64.b64decode(png_bytes)
+                if isinstance(image_base64, str):
+                    image_data = base64.b64decode(image_base64)
                 else:
-                    image_data = png_bytes
+                    image_data = image_base64
 
                 image = Image.open(BytesIO(image_data))
                 st.image(image, use_column_width=True)
@@ -495,13 +495,13 @@ if send_button and user_input.strip():
             st.markdown("---")
             display_response_graph(graph_data)
             # If graph contained inline png, also render a download button below the visualization
-            png_bytes = graph_data.get("png_bytes")
-            if png_bytes:
+            image_base64 = graph_data.get("image_base64") or graph_data.get("png_bytes")
+            if image_base64:
                 try:
-                    if isinstance(png_bytes, str):
-                        imgdata = base64.b64decode(png_bytes)
+                    if isinstance(image_base64, str):
+                        imgdata = base64.b64decode(image_base64)
                     else:
-                        imgdata = png_bytes
+                        imgdata = image_base64
                     st.download_button(
                         "⬇️ Download Chart PNG",
                         data=imgdata,
@@ -510,6 +510,12 @@ if send_button and user_input.strip():
                     )
                 except Exception:
                     pass
+
+        excel_data = data.get("excel")
+        if excel_data:
+            st.markdown("---")
+            st.subheader("📄 Excel JSON")
+            st.json(excel_data)
 
         # Display session context info if available
         session_context = data.get("session_context")

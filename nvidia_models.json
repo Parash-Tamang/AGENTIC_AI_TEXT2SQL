@@ -1,0 +1,430 @@
+{
+    "working": {
+        "abacusai/dracarys-llama-3.1-70b-instruct": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "deepseek-ai/deepseek-v4-flash": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "google/gemma-2-2b-it": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "google/gemma-3n-e2b-it": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "google/gemma-3n-e4b-it": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "meta/llama-3.1-8b-instruct": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "meta/llama-3.2-11b-vision-instruct": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "meta/llama-3.2-1b-instruct": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "meta/llama-3.2-3b-instruct": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "meta/llama-3.2-90b-vision-instruct": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "meta/llama-3.3-70b-instruct": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "meta/llama-4-maverick-17b-128e-instruct": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "meta/llama-guard-4-12b": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "mistralai/ministral-14b-instruct-2512": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "mistralai/mistral-7b-instruct-v0.3": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "mistralai/mistral-small-4-119b-2603": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "nvidia/gliner-pii": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "nvidia/ising-calibration-1-35b-a3b": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "nvidia/llama-3.1-nemoguard-8b-content-safety": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "nvidia/llama-3.1-nemoguard-8b-topic-control": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "nvidia/llama-3.1-nemotron-nano-vl-8b-v1": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "nvidia/llama-3.1-nemotron-safety-guard-8b-v3": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "nvidia/llama-3.3-nemotron-super-49b-v1": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "nvidia/nemotron-3-content-safety": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "nvidia/nemotron-3-super-120b-a12b": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "nvidia/nemotron-content-safety-reasoning-4b": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "nvidia/nemotron-mini-4b-instruct": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "nvidia/nemotron-nano-12b-v2-vl": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "qwen/qwen3-next-80b-a3b-instruct": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "sarvamai/sarvam-m": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "stockmark/stockmark-2-100b-instruct": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "upstage/solar-10.7b-instruct": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        },
+        "z-ai/glm-5.1": {
+            "provider": "nvidia",
+            "max_tokens": 32000
+        }
+    },
+    "failed": [
+        {
+            "model": "01-ai/yi-large",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "adept/fuyu-8b",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "ai21labs/jamba-1.5-large-instruct",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "aisingapore/sea-lion-7b-instruct",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "baai/bge-m3",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "bigcode/starcoder2-15b",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "bytedance/seed-oss-36b-instruct",
+            "reason": "'NoneType' object has no attribute 'strip'"
+        },
+        {
+            "model": "databricks/dbrx-instruct",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "deepseek-ai/deepseek-coder-6.7b-instruct",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "deepseek-ai/deepseek-v4-pro",
+            "reason": "Request timed out."
+        },
+        {
+            "model": "google/codegemma-1.1-7b",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "google/codegemma-7b",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "google/deplot",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "google/gemma-2b",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "google/gemma-3-12b-it",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "google/gemma-3-4b-it",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "google/gemma-4-31b-it",
+            "reason": "Request timed out."
+        },
+        {
+            "model": "google/recurrentgemma-2b",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "ibm/granite-3.0-3b-a800m-instruct",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "ibm/granite-3.0-8b-instruct",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "ibm/granite-34b-code-instruct",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "ibm/granite-8b-code-instruct",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "meta/codellama-70b",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "meta/llama-3.1-70b-instruct",
+            "reason": "Request timed out."
+        },
+        {
+            "model": "meta/llama2-70b",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "microsoft/kosmos-2",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "microsoft/phi-3-vision-128k-instruct",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "microsoft/phi-3.5-moe-instruct",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "microsoft/phi-4-mini-instruct",
+            "reason": "Request timed out."
+        },
+        {
+            "model": "microsoft/phi-4-multimodal-instruct",
+            "reason": "Error code: 400 - {'status': 400, 'title': 'Bad Request', 'd"
+        },
+        {
+            "model": "minimaxai/minimax-m2.7",
+            "reason": "Request timed out."
+        },
+        {
+            "model": "mistralai/codestral-22b-instruct-v0.1",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "mistralai/mistral-large",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "mistralai/mistral-large-2-instruct",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "mistralai/mistral-large-3-675b-instruct-2512",
+            "reason": "Request timed out."
+        },
+        {
+            "model": "mistralai/mistral-medium-3.5-128b",
+            "reason": "Request timed out."
+        },
+        {
+            "model": "mistralai/mistral-nemotron",
+            "reason": "Error code: 400 - {'status': 400, 'title': 'Bad Request', 'd"
+        },
+        {
+            "model": "mistralai/mixtral-8x22b-v0.1",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "mistralai/mixtral-8x7b-instruct-v0.1",
+            "reason": "Request timed out."
+        },
+        {
+            "model": "moonshotai/kimi-k2.6",
+            "reason": "Request timed out."
+        },
+        {
+            "model": "nv-mistralai/mistral-nemo-12b-instruct",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "nvidia/ai-synthetic-video-detector",
+            "reason": "Error code: 500 - {'type': 'urn:nvcf-worker-service:problem-"
+        },
+        {
+            "model": "nvidia/cosmos-reason2-8b",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "nvidia/llama-3.1-nemotron-51b-instruct",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "nvidia/llama-3.1-nemotron-70b-instruct",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "nvidia/llama-3.1-nemotron-nano-8b-v1",
+            "reason": "Request timed out."
+        },
+        {
+            "model": "nvidia/llama-3.1-nemotron-ultra-253b-v1",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "nvidia/llama-3.3-nemotron-super-49b-v1.5",
+            "reason": "'NoneType' object has no attribute 'strip'"
+        },
+        {
+            "model": "nvidia/llama3-chatqa-1.5-70b",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "nvidia/mistral-nemo-minitron-8b-8k-instruct",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "nvidia/nemoretriever-parse",
+            "reason": "Error code: 400 - {'object': 'error', 'message': 'Content ca"
+        },
+        {
+            "model": "nvidia/nemotron-3-nano-30b-a3b",
+            "reason": "'NoneType' object has no attribute 'strip'"
+        },
+        {
+            "model": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+            "reason": "'NoneType' object has no attribute 'strip'"
+        },
+        {
+            "model": "nvidia/nemotron-4-340b-instruct",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "nvidia/nemotron-4-340b-reward",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "nvidia/nemotron-nano-3-30b-a3b",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "nvidia/nemotron-parse",
+            "reason": "Error code: 400 - {'object': 'error', 'message': 'Content ca"
+        },
+        {
+            "model": "nvidia/neva-22b",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "nvidia/nvclip",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "nvidia/nvidia-nemotron-nano-9b-v2",
+            "reason": "'NoneType' object has no attribute 'strip'"
+        },
+        {
+            "model": "nvidia/vila",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "openai/gpt-oss-120b",
+            "reason": "'NoneType' object has no attribute 'strip'"
+        },
+        {
+            "model": "openai/gpt-oss-20b",
+            "reason": "'NoneType' object has no attribute 'strip'"
+        },
+        {
+            "model": "qwen/qwen3-coder-480b-a35b-instruct",
+            "reason": "Request timed out."
+        },
+        {
+            "model": "qwen/qwen3.5-122b-a10b",
+            "reason": "'NoneType' object has no attribute 'strip'"
+        },
+        {
+            "model": "qwen/qwen3.5-397b-a17b",
+            "reason": "Request timed out."
+        },
+        {
+            "model": "stepfun-ai/step-3.5-flash",
+            "reason": "'NoneType' object has no attribute 'strip'"
+        },
+        {
+            "model": "stepfun-ai/step-3.7-flash",
+            "reason": "'NoneType' object has no attribute 'strip'"
+        },
+        {
+            "model": "writer/palmyra-creative-122b",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "writer/palmyra-fin-70b-32k",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "writer/palmyra-med-70b",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "writer/palmyra-med-70b-32k",
+            "reason": "404 Not Found"
+        },
+        {
+            "model": "zyphra/zamba2-7b-instruct",
+            "reason": "404 Not Found"
+        }
+    ]
+}

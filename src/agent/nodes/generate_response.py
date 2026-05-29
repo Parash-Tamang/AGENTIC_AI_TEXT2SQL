@@ -320,6 +320,7 @@ def _build_user_prompt(
     history: List[Dict[str, str]],
     schema_summary: _SchemaSummary,
     graph_data: Optional[Dict[str, Any]] = None,
+    excel_data: Optional[Dict[str, Any]] = None,
 ) -> str:
     payload: Dict[str, Any] = {
         "user_raw_query": user_query,
@@ -341,8 +342,31 @@ def _build_user_prompt(
         if graph_data.get("chart_type") == "stat_card":
             viz_summary["value"] = graph_data.get("value")
         # Signal whether an image/png was rendered and included in state
-        viz_summary["has_image"] = bool(graph_data.get("png_bytes"))
+        viz_summary["has_image"] = bool(
+            graph_data.get("image_base64") or graph_data.get("png_bytes")
+        )
         payload["visualization"] = viz_summary
+        payload["visualization_reasoning"] = graph_data.get("reasoning")
+        payload["visualization_requested_graph_type"] = graph_data.get(
+            "requested_graph_type"
+        )
+
+    if excel_data:
+        payload["excel"] = {
+            "available": True,
+            "format": excel_data.get("format", "EXCEL"),
+            "rowcount": excel_data.get("rowcount", 0),
+            "columns": excel_data.get("columns", []),
+            "sample_rows": excel_data.get("rows", [])[:_MAX_RESULT_ROWS_IN_PROMPT],
+            "same_sample_as_results_summary": True,
+        }
+
+    payload["response_instructions"] = (
+        "If visualization data is present, explain in one short sentence why that "
+        "chart type was chosen, using the visualization_reasoning field. Keep the "
+        "answer natural and user-facing. If excel data is present, also mention "
+        "that the same sample data is available in Excel."
+    )
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -403,6 +427,12 @@ def response_generator_node(
             "EXPLAIN": "Explain the previous result or query in plain language.",
             "SUMMARIZE": "Summarize the conversation or previous results clearly.",
             "NEEDS_CLARITY": "Politely ask the user to clarify their request.",
+            "OUT_OF_SCOPE": (
+                "Answer the user's question directly using general knowledge, "
+                "as if it were a normal conversational question. If the answer "
+                "is uncertain, say so briefly instead of referring to SQL, "
+                "databases, or the system."
+            ),
         }
         instruction = conversational_prompts.get(intent, "Respond helpfully.")
 
@@ -488,6 +518,94 @@ def response_generator_node(
     schema_summary = _SchemaSummary.from_raw_schemas(
         state_data.get("retrieved_schemas") or []
     )
+    # If no schema information is available, prompt the user for clarification.
+    # This avoids attempting to describe or summarize data when we don't know
+    # the underlying schema the query would target.
+    if not schema_summary.tables:
+        clarify_msg = (
+            "I couldn't find any database schema information to run this request. "
+            "Could you specify which table or fields you want to query, or provide a bit more detail about the data you're after?"
+        )
+        # If view suggestions exist, include them in the clarification so the
+        # user has quick options to pick from even when schema info is missing.
+        suggestions_block = (
+            _format_suggestions_block(view_suggestions) if view_suggestions else ""
+        )
+        shown_suggestion_names = (
+            [s["view_name"] for s in view_suggestions] if suggestions_block else []
+        )
+        # Route to conversational LLM (Generate) to produce a polite clarify prompt
+        # so the tone and phrasing come from the model rather than a hardcoded
+        # message. Build the conversational prompt including the clarify hint.
+        instruction = (
+            "Politely ask the user to clarify their request. If helpful, offer the "
+            "suggested views below as quick options."
+        )
+
+        conv_payload = json.dumps(
+            {
+                "user_raw_query": user_query,
+                "conversation_history": history,
+                "instruction": instruction,
+                "clarify_hint": clarify_msg,
+                "suggested_views": view_suggestions,
+            },
+            ensure_ascii=False,
+        )
+
+        try:
+            response_format = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "response_node_output",
+                    "schema": ResponseNodeOutput.model_json_schema(),
+                },
+            }
+
+            system_prompt = resolve_system_prompt(
+                state_data, "generate_response", GENERATE_RESPONSE_SYSTEM
+            )
+
+            raw_response = llm.generate(
+                system_prompt=system_prompt,
+                user_prompt=conv_payload,
+                response_format=response_format,
+                json_mode=True,
+            )
+        except Exception as exc:
+            logger.error("LLM failed to generate clarification: %s", exc)
+            # Fall back to the simple clarify_msg if LLM fails
+            return {
+                **state_data,
+                "user_facing_response": clarify_msg
+                + ("\n\n" + suggestions_block if suggestions_block else ""),
+                "response_token_breakdown": {},
+                "view_suggestions_shown": shown_suggestion_names,
+            }
+
+        # Parse structured or raw response
+        if isinstance(raw_response, (dict, list)):
+            resp_obj = (
+                raw_response if isinstance(raw_response, dict) else raw_response[0]
+            )
+            user_text = str(resp_obj.get("response", "")).strip()
+        else:
+            try:
+                parsed = json.loads(raw_response)
+                user_text = str(parsed.get("response", "")).strip()
+            except Exception:
+                user_text = str(raw_response).strip()
+
+        final_response = user_text + (
+            "\n\n" + suggestions_block if suggestions_block else ""
+        )
+
+        return {
+            **state_data,
+            "user_facing_response": final_response,
+            "response_token_breakdown": {},
+            "view_suggestions_shown": shown_suggestion_names,
+        }
     results_summary = _build_results_summary(rows, rowcount, error)
     results_status = results_summary["status"]
 
@@ -498,6 +616,7 @@ def response_generator_node(
         history,
         schema_summary,
         state_data.get("graph_data"),
+        state_data.get("excel"),
     )
     # choose system prompt for token counting and generation
     system_prompt = resolve_system_prompt(

@@ -38,6 +38,7 @@ from src.agent.prompt.schema_agent import (
 from src.agent.tools.executor import dispatch, SchemaResult
 from src.agent.utils.pretty_print import pretty_log
 from src.agent.utils.prompt_utils import resolve_system_prompt
+from src.models.permission_context import get_permission_context
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -132,6 +133,21 @@ def _as_list_or_dict(raw: Any) -> Any:
     if isinstance(raw, str):
         return json.loads(raw)
     return raw
+
+
+def _resolve_allowed_table_names(user_role: str | None) -> list[str]:
+    """Resolve RBAC allowlist as unqualified table names for vector-store $in filters."""
+    if not user_role:
+        return []
+    try:
+        allowed = get_permission_context(user_role).allowed_tables()
+        # permissions.json stores qualified names like SalesLT.Customer; metadata table_name is bare.
+        return sorted({str(t).split(".")[-1] for t in allowed if str(t).strip()})
+    except Exception as exc:
+        logger.warning(
+            "Could not resolve RBAC allowlist for role '%s': %s", user_role, exc
+        )
+        return []
 
 
 def _get_all_queries(state: dict[str, Any]) -> list[str]:
@@ -254,10 +270,15 @@ def _run_schema_sufficiency_check(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _fetch_schemas_for_query(query: str, top_k: int) -> tuple[str, list[SchemaResult]]:
+def _fetch_schemas_for_query(
+    query: str, top_k: int, allowed_table_names: list[str] | None = None
+) -> tuple[str, list[SchemaResult]]:
     """Fetch + validate schemas for one query."""
     try:
-        raw = dispatch("fetch_schema", {"query": query, "top_k": top_k})
+        payload: dict[str, Any] = {"query": query, "top_k": top_k}
+        if allowed_table_names:
+            payload["table_names"] = allowed_table_names
+        raw = dispatch("fetch_schema", payload)
         raw_list = _as_list_or_dict(raw)
         if isinstance(raw_list, dict):
             if "error" in raw_list:
@@ -289,12 +310,15 @@ def _fetch_schemas_for_query(query: str, top_k: int) -> tuple[str, list[SchemaRe
         return query, []
 
 
-def _run_semantic_fetch(queries: list[str], top_k: int) -> SchemasState:
+def _run_semantic_fetch(
+    queries: list[str], top_k: int, allowed_table_names: list[str] | None = None
+) -> SchemasState:
     """Sequential fetch (MAX_WORKERS=1 for SQLite safety, ready for Postgres bump)."""
     state = SchemasState()
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {
-            executor.submit(_fetch_schemas_for_query, q, top_k): q for q in queries
+            executor.submit(_fetch_schemas_for_query, q, top_k, allowed_table_names): q
+            for q in queries
         }
         for future in as_completed(futures):
             query = futures[future]
@@ -431,6 +455,7 @@ def _run_bfs(seed_tables: list[str], max_hops: int) -> tuple[list[dict], list[st
 def _fetch_missing_tables(
     discovered_tables: list[str],
     schemas_state: SchemasState,
+    allowed_table_names: list[str] | None = None,
 ) -> list[SchemaResult]:
     """
     For each BFS-discovered table not already in schemas_state, fetch its full
@@ -442,6 +467,10 @@ def _fetch_missing_tables(
     normalized = [
         str(t).strip().split(".")[-1] for t in discovered_tables if str(t).strip()
     ]
+    allowed_set = set(allowed_table_names or [])
+    if allowed_set:
+        normalized = [t for t in normalized if t in allowed_set]
+
     missing = [t for t in normalized if not schemas_state.has_table(t)]
     if not missing:
         logger.debug("No missing tables — all BFS tables already fetched")
@@ -460,6 +489,8 @@ def _fetch_missing_tables(
                 {
                     "query": table_name,  # minimal query — exact filter does the work
                     "table_name": table_name,  # ChromaDB WHERE clause
+                    "table_names": allowed_table_names
+                    or [],  # ChromaDB WHERE table_name $in [...]
                     "top_k": 1,  # only need the one exact match
                 },
             )
@@ -538,6 +569,12 @@ def schema_fetcher_node(
             }
 
     queries = _get_all_queries(state)
+    allowed_table_names = _resolve_allowed_table_names(state.get("user_role"))
+    if allowed_table_names:
+        logger.info(
+            "Applying RBAC table allowlist (%d) for schema retrieval",
+            len(allowed_table_names),
+        )
     constructed_query = state.get("construct", {}).get("constructed_query", "")
     user_query_for_validation = (
         constructed_query or state.get("refined_query") or state.get("user_query", "")
@@ -558,7 +595,7 @@ def schema_fetcher_node(
     logger.info(f"Schema fetch for {len(queries)} queries")
 
     # ── Step 1: semantic fetch ────────────────────────────────────────────────
-    schemas_state = _run_semantic_fetch(queries, top_k)
+    schemas_state = _run_semantic_fetch(queries, top_k, allowed_table_names)
     logger.info(f"Semantic fetch: {schemas_state.unique_count} unique schemas")
 
     # Always expose coverage keys in state, even when validation cannot run.
@@ -596,7 +633,9 @@ def schema_fetcher_node(
             join_paths, discovered_tables = _run_bfs(seed_tables, bfs_depth)
 
             # ── Step 4: WHERE fetch for missing tables ────────────────────────
-            missing_schemas = _fetch_missing_tables(discovered_tables, schemas_state)
+            missing_schemas = _fetch_missing_tables(
+                discovered_tables, schemas_state, allowed_table_names
+            )
             for schema in missing_schemas:
                 # Register under constructed_query as source
                 schemas_state.add_schema(f"bfs:{schema.table_name}", schema)
@@ -629,7 +668,7 @@ def schema_fetcher_node(
                     f"Schema sufficiency retry {attempt}: fetching missing tables {coverage.missing_tables}"
                 )
                 retry_schemas = _fetch_missing_tables(
-                    coverage.missing_tables, schemas_state
+                    coverage.missing_tables, schemas_state, allowed_table_names
                 )
                 if not retry_schemas:
                     logger.warning(
@@ -657,6 +696,35 @@ def schema_fetcher_node(
         f"Schema agent complete: {schemas_state.unique_count} schemas, "
         f"{len(seed_tables)} seeds, {len(join_paths)} join paths"
     )
+
+    # If we found no schemas, signal the pipeline to generate a clarification
+    # response rather than attempting SQL generation. This keeps the short-
+    # circuit logic inside the schema agent as requested by the caller.
+    if schemas_state.unique_count == 0:
+        clarify_hint = (
+            "I couldn't find any database schema information to run this request. "
+            "Please specify which table or fields you want to query, or provide a bit more detail about the data you're after."
+        )
+        state = {
+            **state,
+            "intent": {
+                "intent": "NEEDS_CLARITY",
+                "route_to": "Generate",
+                "confidence": 1.0,
+                "output_format": "NL",
+                "graph_type": None,
+                "excel_marker": False,
+                "reasoning": "No schemas found — requesting clarification.",
+            },
+            "clarify_hint": clarify_hint,
+            # still include empty schema outputs for downstream compatibility
+            "schemas": schemas_state.serializable(),
+            "retrieved_schemas": [],
+            "seed_tables": seed_tables,
+            "join_paths": join_paths,
+        }
+
+        return state
 
     # Pretty print concise summary
     pretty_log(
