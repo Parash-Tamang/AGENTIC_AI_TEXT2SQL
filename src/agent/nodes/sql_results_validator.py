@@ -236,6 +236,7 @@ class PipelineState(BaseModel):
 
     # Execution / retry bookkeeping
     execution_result: Optional[Dict[str, Any]] = Field(default=None)
+    excel: Dict[str, Any] = Field(default_factory=dict)
     validation_errors: List[str] = Field(default_factory=list)
     suggested_fix: str = Field(default="")
     view_suggestions: List[Dict[str, Any]] = Field(default_factory=list)
@@ -248,6 +249,13 @@ class PipelineState(BaseModel):
     validation_error: Optional[str] = Field(default=None)
 
     model_config = {"extra": "allow"}
+
+
+class ExcelResponse(BaseModel):
+    format: str = "EXCEL"
+    rowcount: int
+    columns: List[str] = Field(default_factory=list)
+    rows: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 # ===========================================================================
@@ -492,6 +500,15 @@ def _format_join_paths_for_llm(join_paths: List[Any]) -> str:
     )
 
 
+def _format_authorization_policy_for_llm(policy: Optional[Dict[str, Any]]) -> str:
+    if not policy:
+        return "No authorization policy provided."
+    try:
+        return json.dumps(policy, ensure_ascii=False, indent=2)
+    except Exception:
+        return str(policy)
+
+
 def _parse_llm_json(raw: str) -> Dict[str, Any]:
     """Extract and parse the first JSON object from an LLM response."""
     text = raw.strip()
@@ -510,6 +527,48 @@ def _append_validation_log(entry: Dict[str, Any]) -> None:
     record = {"timestamp": datetime.now(timezone.utc).isoformat(), **entry}
     with SQL_VALIDATION_LOG.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+
+
+def _build_excel_response(state: dict[str, Any]) -> Dict[str, Any]:
+    intent = state.get("intent") or {}
+    if not isinstance(intent, dict) or not intent.get("excel_marker"):
+        return {}
+
+    if state.get("validation_passed") is not True:
+        return {}
+
+    execution_result = state.get("execution_result") or {}
+    rows: List[Any] = []
+    if isinstance(execution_result, dict):
+        rows = execution_result.get("rows") or []
+        if not rows:
+            rows = (state.get("execution_analysis") or {}).get("sample_rows") or []
+
+    if not rows:
+        return {}
+
+    sanitized_rows: List[Dict[str, Any]] = []
+    for row in rows:
+        if isinstance(row, dict):
+            sanitized_rows.append(
+                {
+                    key: (
+                        value
+                        if isinstance(value, (str, int, float, bool, type(None)))
+                        else str(value)
+                    )
+                    for key, value in row.items()
+                }
+            )
+        else:
+            sanitized_rows.append({"_value": str(row)})
+
+    payload = ExcelResponse(
+        rowcount=len(sanitized_rows),
+        columns=list(sanitized_rows[0].keys()) if sanitized_rows else [],
+        rows=sanitized_rows,
+    )
+    return payload.model_dump()
 
 
 # ===========================================================================
@@ -568,6 +627,9 @@ def sql_post_execution_validator_node(
             "sample_rows": exec_analysis.sample_rows,
             "error": exec_analysis.error,
         },
+        "AuthorizationPolicy": _format_authorization_policy_for_llm(
+            state.get("authorization_policy")
+        ),
     }
 
     user_prompt = json.dumps(payload, ensure_ascii=False)
@@ -675,6 +737,13 @@ def sql_post_execution_validator_node(
         "self_rag_decision": decision.model_dump(),
         "validation_token_breakdown": token_breakdown.model_dump(),
         "validation_passed": decision.overall_valid,
+        "excel": _build_excel_response(
+            {
+                **state,
+                "execution_analysis": exec_analysis.model_dump(),
+                "validation_passed": decision.overall_valid,
+            }
+        ),
         "validation_error": None,
     }
 
@@ -687,6 +756,7 @@ __all__ = [
     "SelfRAGDecision",
     "TokenBreakdown",
     "PipelineState",
+    "ExcelResponse",
     "analyze_execution_result",
     "decide_self_rag_retry",
     "sql_post_execution_validator_node",

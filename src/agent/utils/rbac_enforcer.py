@@ -1,104 +1,107 @@
-# src/agent/utils/rbac_enforcer.py
-
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 import sqlglot
 import sqlglot.expressions as exp
 
-logger = logging.getLogger(__name__)
+
+def _normalize_table_name(name: str) -> str:
+    name = (name or "").strip()
+    if not name:
+        return ""
+    return name.split(".")[-1].lower()
+
+
+def _normalize_mandatory_filters(
+    mandatory_filters: dict[str, dict[str, Any]] | None,
+) -> dict[str, dict[str, dict[str, Any]]]:
+    normalized: dict[str, dict[str, dict[str, Any]]] = {}
+    for table, rules in (mandatory_filters or {}).items():
+        table_key = _normalize_table_name(str(table))
+        if not table_key or not isinstance(rules, dict):
+            continue
+
+        table_rules: dict[str, dict[str, Any]] = {}
+        for col, rule in rules.items():
+            col_key = str(col).strip().lower()
+            if not col_key:
+                continue
+
+            if isinstance(rule, dict):
+                filter_type = str(rule.get("filter", "id"))
+                values = rule.get("values")
+            else:
+                filter_type = "id"
+                values = None
+
+            if values is not None and not isinstance(values, list):
+                values = [values]
+
+            table_rules[col_key] = {"filter": filter_type, "values": values}
+
+        normalized[table_key] = table_rules
+
+    return normalized
+
+
+def _literal(value: Any) -> exp.Literal:
+    text = str(value).strip()
+    if text.isdigit() or (text.startswith("-") and text[1:].isdigit()):
+        return exp.Literal.number(text)
+    return exp.Literal.string(text)
 
 
 def enforce_mandatory_filters(
     sql: str,
-    mandatory_filters: dict[str, dict[str, Any]],
-) -> tuple[str, dict[str, str]]:
-    """
-    Post-process generated SQL to hard-enforce id-type mandatory filters.
-    Replaces any user-supplied value for id-filtered columns with the
-    role-permitted value. Runs AFTER LLM generation — cannot be bypassed.
+    mandatory_filters: dict[str, dict[str, Any]] | None,
+) -> tuple[str, dict[str, dict[str, list[str]]]]:
+    tree = sqlglot.parse_one(sql, dialect="tsql")
 
-    Returns:
-        (rewritten_sql, enforced_filters) where enforced_filters is a dict of
-        {"Table.Column": "enforced_value"} for every value that was locked by
-        policy. This must be stored in state["rbac_enforced_filters"] so the
-        semantic validator does not flag policy-rewritten values as intent
-        mismatches against the user query.
-    """
-    if not mandatory_filters:
-        return sql, {}
+    required = _normalize_mandatory_filters(mandatory_filters)
 
-    try:
-        tree = sqlglot.parse_one(sql, dialect="tsql")
-    except Exception:
-        logger.error("RBAC enforcer: sqlglot parse failed — returning original SQL")
-        return sql, {}
+    table_alias: dict[str, str] = {}
+    used_tables: set[str] = set()
+    for table_expr in tree.find_all(exp.Table):
+        bare = _normalize_table_name(table_expr.name or "")
+        if not bare:
+            continue
+        used_tables.add(bare)
+        alias = (table_expr.alias_or_name or "").strip()
+        table_alias[bare] = alias or table_expr.name
 
-    modified = False
-    enforced_filters: dict[str, str] = {}
+    predicates: list[exp.Expression] = []
+    enforced: dict[str, dict[str, list[str]]] = {}
 
-    for node in tree.find_all(exp.EQ):
-        left = node.args.get("this")
-        if not isinstance(left, exp.Column):
+    for table_name, cols in required.items():
+        if table_name not in used_tables:
             continue
 
-        col_name = left.name
-        table_ref = (left.args.get("table") or exp.Identifier(this="")).name.lower()
-
-        for table, filters in mandatory_filters.items():
-            table_bare = table.split(".")[-1].lower()
-
-            # Skip if table_ref is specified and doesn't match
-            if table_ref and table_ref not in (table.lower(), table_bare):
+        qualifier = table_alias.get(table_name, table_name)
+        for col_name, rule in cols.items():
+            values = rule.get("values")
+            if not values:
                 continue
 
-            # Find matching column filter
-            filter_rule = filters.get(col_name) or filters.get(col_name.lower())
-            if not filter_rule:
-                continue
+            value_list = [str(v).strip() for v in values]
+            in_expr = exp.In(
+                this=exp.column(col_name, table=qualifier),
+                expressions=[_literal(v) for v in value_list],
+            )
+            predicates.append(in_expr)
+            enforced.setdefault(table_name, {})[col_name] = value_list
 
-            filter_type = filter_rule.get("filter")
-            values = filter_rule.get("values")
+    if predicates:
+        combined_predicate = predicates[0]
+        for pred in predicates[1:]:
+            combined_predicate = exp.and_(combined_predicate, pred)
 
-            if filter_type == "id" and values:
-                permitted_value = values[0]
-                current_right = node.args.get("expression")
-                current_val = (
-                    current_right.this
-                    if current_right and hasattr(current_right, "this")
-                    else None
-                )
+        where_clause = tree.args.get("where")
+        if where_clause is None:
+            tree.set("where", exp.Where(this=combined_predicate))
+        else:
+            tree.set(
+                "where", exp.Where(this=exp.and_(where_clause.this, combined_predicate))
+            )
 
-                if str(current_val) != str(permitted_value):
-                    logger.warning(
-                        f"RBAC enforcer: {table}.{col_name} "
-                        f"overriding {current_val!r} → {permitted_value!r}"
-                    )
-
-                # Replace the RIGHT side (expression), not the node itself
-                new_literal = (
-                    exp.Literal.number(permitted_value)
-                    if str(permitted_value).isdigit()
-                    else exp.Literal.string(permitted_value)
-                )
-                node.set("expression", new_literal)
-                modified = True
-
-                # Record the enforced value so the validator knows not to
-                # flag it as a mismatch against the user query.
-                # Key format: "SalesLT.Customer.CustomerID" → "60"
-                enforced_filters[f"{table}.{col_name}"] = str(permitted_value)
-
-    if not modified:
-        logger.debug("RBAC enforcer: no id filters needed rewriting")
-        return sql, {}
-
-    try:
-        result = tree.sql(dialect="tsql")
-        logger.info("RBAC enforcer: SQL rewritten successfully")
-        return result, enforced_filters
-    except Exception as e:
-        logger.error(f"RBAC enforcer: sql() generation failed: {e}")
-        return sql, {}
+    return tree.sql(dialect="tsql"), enforced

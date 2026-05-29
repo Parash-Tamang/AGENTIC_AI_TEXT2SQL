@@ -11,7 +11,8 @@ GRAPH: dict[str, dict] = {
     "query_decomposer": {"next": "views_fetcher"},
     "views_fetcher": {"next": "schema_fetcher"},
     "schema_fetcher": {"next": "sql_generator"},
-    "sql_generator": {"next": "sql_validator"},
+    "sql_generator": {"next": "rbac_enforcer"},
+    "rbac_enforcer": {"router": "rbac_router"},
     "sql_validator": {"router": "sql_validation_router"},
     "executor": {"next": "sql_post_execution_validator"},
     "sql_post_execution_validator": {"router": "validation_router"},
@@ -31,6 +32,11 @@ ROUTERS: dict[str, dict[str, str | None]] = {
     "sql_validation_router": {
         "sql_generator": "sql_generator",  # static check failed → retry
         "results_validator": "executor",  # static check passed → execute
+    },
+    "rbac_router": {
+        "response": "response_generator",  # denied → direct safe response
+        "sql_generator": "sql_generator",  # missing filters → retry SQL
+        "sql_validator": "sql_validator",  # allowed → continue validation
     },
     "validation_router": {
         "sql_generator": "sql_generator",  # validation_passed False

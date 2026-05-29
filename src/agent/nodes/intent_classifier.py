@@ -13,7 +13,14 @@ from src.agent.utils.prompt_utils import resolve_system_prompt
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
 
-VALID_INTENTS = {"SQL_QUERY", "EXPLAIN", "SUMMARIZE", "GREETING", "NEEDS_CLARITY"}
+VALID_INTENTS = {
+    "SQL_QUERY",
+    "EXPLAIN",
+    "SUMMARIZE",
+    "GREETING",
+    "NEEDS_CLARITY",
+    "OUT_OF_SCOPE",
+}
 
 VALID_ROUTES = {
     "QueryTranslation",
@@ -21,7 +28,7 @@ VALID_ROUTES = {
 }
 
 VALID_FORMATS = {"NL", "REPORT", "GRAPH", "EXCEL"}
-VALID_GRAPH_TYPES = {"LINE", "BAR", "PIE", "SCATTER"}
+VALID_GRAPH_TYPES = {"LINE", "BAR", "PIE", "SCATTER", "HISTOGRAM"}
 
 INTENT_ROUTE_MAP = {
     "SQL_QUERY": "QueryTranslation",
@@ -29,6 +36,7 @@ INTENT_ROUTE_MAP = {
     "SUMMARIZE": "Generate",
     "GREETING": "Generate",
     "NEEDS_CLARITY": "Generate",
+    "OUT_OF_SCOPE": "Generate",
 }
 
 # Explicit markers for output format and graph type
@@ -45,8 +53,9 @@ class IntentClassifierOutput(BaseModel):
     intent: str
     route_to: str
     confidence: float
-    output_format: str | None = None
-    graph_type: str | None = None
+    output_format: Optional[str] = None
+    graph_type: Optional[str] = None
+    excel_marker: bool = False
     reasoning: str
 
     def __str__(self) -> str:
@@ -163,18 +172,18 @@ class IntentClassifier:
                 data.get("output_format") or data.get("OutputFormat") or None
             )
             graph_type = data.get("graph_type") or data.get("GraphType") or None
+            excel_marker = bool(
+                data.get("excel_marker")
+                or data.get("ExcelMarker")
+                or str(output_format).upper() == "EXCEL"
+            )
 
-            # enforce nulls for non SQL_QUERY
-            if intent != "SQL_QUERY":
-                output_format = None
-                graph_type = None
-
-            # If graph_type is set, infer output_format as GRAPH
-            if graph_type is not None:
-                output_format = "GRAPH"
+            # Keep graph_type in the output whenever the LLM provides one;
+            # downstream visualization can ignore it unless it is relevant.
 
             # validate values
             intent = intent if intent in VALID_INTENTS else "SQL_QUERY"
+            output_format = output_format.upper() if output_format else None
             output_format = output_format if output_format in VALID_FORMATS else None
             graph_type = graph_type.upper() if graph_type else None
             graph_type = graph_type if graph_type in VALID_GRAPH_TYPES else None
@@ -188,6 +197,7 @@ class IntentClassifier:
                 confidence=confidence,
                 output_format=output_format,
                 graph_type=graph_type,
+                excel_marker=excel_marker,
                 reasoning=data.get("reasoning") or data.get("Reasoning") or "",
             )
 
@@ -198,6 +208,7 @@ class IntentClassifier:
                 confidence=0.0,
                 output_format="NL",
                 graph_type=None,
+                excel_marker=False,
                 reasoning="JSON parse failed — defaulting to SQL_QUERY with NL output.",
             )
 
@@ -222,9 +233,23 @@ class IntentClassifier:
         if result.intent == "SQL_QUERY" and result.output_format is None:
             result.output_format = self._infer_output_format(constructed_query)
 
+        if result.output_format == "EXCEL":
+            result.excel_marker = True
+
         # 4. GRAPH missing graph_type → infer using regex
         if result.output_format == "GRAPH" and result.graph_type is None:
             result.graph_type = self._infer_graph_type(constructed_query)
+
+        # 5. SQL queries with an obvious visualization hint should still
+        # produce a graph_type even if the LLM omitted it.
+        if result.intent == "SQL_QUERY" and result.graph_type is None:
+            inferred_graph_type = self._infer_graph_type(constructed_query)
+            if inferred_graph_type is not None:
+                result.graph_type = inferred_graph_type
+                # Keep Excel independent: if user asked for spreadsheet/export,
+                # do not override output_format to GRAPH.
+                if result.output_format != "EXCEL":
+                    result.output_format = "GRAPH"
 
         return result
 
@@ -237,11 +262,45 @@ class IntentClassifier:
     # prior-result and history detection removed — classifier no longer relies on conversation state
 
     def _infer_output_format(self, query: str) -> str | None:
-        """Let LLM decide output format."""
+        """Let the LLM decide output format.
+
+        Output format is intentionally model-driven so GRAPH and EXCEL can be
+        chosen independently based on user intent.
+        """
         return None
 
     def _infer_graph_type(self, query: str) -> str | None:
-        """Let LLM decide graph type."""
+        """Infer a graph type from visualization keywords in the query."""
+        normalized = (query or "").lower()
+
+        if not normalized:
+            return None
+
+        if re.search(
+            r"\b(trend|over time|monthly|yearly|by month|by year|per day|per week)\b",
+            normalized,
+        ):
+            return "LINE"
+
+        if re.search(
+            r"\b(compare|comparison|rank|ranking|top\s*\d+|highest|lowest|group by|by\s+[a-z])\b",
+            normalized,
+        ):
+            return "BAR"
+
+        if re.search(
+            r"\b(distribution|spread|histogram|bins|bucket|bucketed)\b", normalized
+        ):
+            return "HISTOGRAM"
+
+        if re.search(r"\b(correlation|scatter|vs\.?|versus|x\s*and\s*y)\b", normalized):
+            return "SCATTER"
+
+        if re.search(
+            r"\b(share|proportion|breakdown|percentage|slice|pie)\b", normalized
+        ):
+            return "PIE"
+
         return None
 
 

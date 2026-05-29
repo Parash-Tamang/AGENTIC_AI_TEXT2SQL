@@ -11,6 +11,7 @@ Mirrors the sql_refiner.py pattern:
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from typing import Any, Literal, Optional
@@ -26,6 +27,16 @@ from uuid import uuid4
 from src.agent.llm.base import BaseLLM
 
 logger = logging.getLogger(__name__)
+
+VALID_GRAPH_TYPES = {"LINE", "BAR", "PIE", "SCATTER", "HISTOGRAM"}
+
+_GRAPH_TYPE_TO_CHART_TYPE = {
+    "LINE": "line",
+    "BAR": "bar",
+    "PIE": "pie",
+    "SCATTER": "scatter",
+    "HISTOGRAM": "histogram",
+}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -165,6 +176,54 @@ def _build_user_prompt(
         f"Sample data (first 5 rows):\n"
         f"{json.dumps(sample_rows, indent=2, default=str)}"
     )
+
+
+def _normalize_chart_dataframe(df: pd.DataFrame, vl: VegaLiteSpec) -> pd.DataFrame:
+    """Convert Python date/datetime objects into JSON-safe pandas timestamps.
+
+    vl-convert serializes the Vega-Lite spec to JSON. Native Python ``date``
+    values can fail that serialization, so temporal fields are normalized before
+    chart construction.
+    """
+    normalised = df.copy()
+
+    for field_name, field_type in ((vl.x_field, vl.x_type), (vl.y_field, vl.y_type)):
+        if (
+            not field_name
+            or field_type != "temporal"
+            or field_name not in normalised.columns
+        ):
+            continue
+
+        try:
+            normalised[field_name] = pd.to_datetime(
+                normalised[field_name], errors="coerce"
+            )
+        except Exception:
+            # Fall back to ISO-like strings if pandas cannot coerce the column.
+            normalised[field_name] = normalised[field_name].map(
+                lambda value: (
+                    value.isoformat() if hasattr(value, "isoformat") else value
+                )
+            )
+
+    return normalised
+
+
+def _extract_intent_graph_type(state: dict[str, Any]) -> Optional[str]:
+    intent = state.get("intent") or {}
+    if isinstance(intent, dict):
+        graph_type = intent.get("graph_type")
+        if isinstance(graph_type, str):
+            graph_type = graph_type.strip().upper()
+            return graph_type if graph_type in VALID_GRAPH_TYPES else None
+    return None
+
+
+def _resolve_requested_chart_type(graph_type: Optional[str]) -> Optional[str]:
+    if not graph_type:
+        return None
+    return _GRAPH_TYPE_TO_CHART_TYPE.get(graph_type)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -353,6 +412,12 @@ def _render_png(chart: alt.Chart) -> Optional[bytes]:
         return None
 
 
+def _encode_png_to_base64(png_bytes: Optional[bytes]) -> Optional[str]:
+    if not png_bytes:
+        return None
+    return base64.b64encode(png_bytes).decode("utf-8")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Public node  (signature mirrors sql_refiner.refine_sql)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -375,7 +440,7 @@ def visualization_agent_node(
             "chart_type": str,
             "title":      str,
             "reasoning":  str,
-            "png_bytes":  bytes | None,
+            "image_base64": str | None,
         }
     """
 
@@ -390,6 +455,7 @@ def visualization_agent_node(
     generated_sql = state.get("generated_sql", "")
     sanitised_schema = state.get("sanitised_schema", {})
     execution_result = state.get("execution_result")
+    requested_graph_type = _extract_intent_graph_type(state)
 
     # ── 2. Guard: nothing to visualize ────────────────────────────────────
     if not execution_result:
@@ -400,6 +466,11 @@ def visualization_agent_node(
     rows = execution_result.get("rows") or execution_result.get("data") or []
     if not rows:
         logger.debug("Viz agent: result rows are empty, skipping")
+        state["graph_data"] = None
+        return state
+
+    if requested_graph_type is None:
+        logger.info("Viz agent: no valid graph_type found in intent, skipping")
         state["graph_data"] = None
         return state
 
@@ -420,6 +491,15 @@ def visualization_agent_node(
         state["graph_data"] = None
         return state
 
+    if vl.chart_type != "stat_card":
+        requested_chart_type = _resolve_requested_chart_type(requested_graph_type)
+        if requested_chart_type and vl.chart_type != requested_chart_type:
+            logger.info(
+                "Viz agent: intent requested graph_type=%s but LLM selected chart_type=%s",
+                requested_graph_type,
+                vl.chart_type,
+            )
+
     logger.info(
         "Viz agent selected chart_type=%s | reasoning: %s",
         vl.chart_type,
@@ -434,7 +514,7 @@ def visualization_agent_node(
             "title": vl.title,
             "reasoning": vl.reasoning,
             "value": scalar,
-            "png_bytes": None,
+            "image_base64": None,
         }
         return state
 
@@ -445,6 +525,7 @@ def visualization_agent_node(
         builder = _build_bar
 
     try:
+        df = _normalize_chart_dataframe(df, vl)
         chart = builder(df, vl).properties(
             title=vl.title,
             width=700,
@@ -457,6 +538,7 @@ def visualization_agent_node(
 
     # ── 7. Render PNG via vl-convert ──────────────────────────────────────
     png_bytes = _render_png(chart)
+    image_base64 = _encode_png_to_base64(png_bytes)
 
     # Persist PNG to disk under assets/images/YYYY-MM-DD for easy retrieval
     image_path = None
@@ -478,9 +560,10 @@ def visualization_agent_node(
     # ── 8. Write back to state ────────────────────────────────────────────
     state["graph_data"] = {
         "chart_type": vl.chart_type,
+        "requested_graph_type": requested_graph_type,
         "title": vl.title,
         "reasoning": vl.reasoning,
-        "png_bytes": png_bytes,
+        "image_base64": image_base64,
         "image_path": image_path,
     }
     return state
@@ -493,8 +576,8 @@ def visualization_agent_node(
 
 def should_visualize(state: dict[str, Any]) -> bool:
     """Conditional edge for LangGraph: check if graph output was requested."""
-    graph_type = (state.get("intent") or {}).get("graph_type")
-    result = bool(graph_type)
+    graph_type = _extract_intent_graph_type(state)
+    result = graph_type in VALID_GRAPH_TYPES if graph_type else False
 
     if not result:
         logger.info("Visualization skipped: graph_type is None or False")

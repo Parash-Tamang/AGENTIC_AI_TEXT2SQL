@@ -516,6 +516,7 @@ class PermissionValidator:
                                         "reason": f"Value not in allowed: {allowed_values}",
                                     }
                                 )
+                            print(val)
                     else:
                         # Single value
                         if str(val) not in [str(av) for av in allowed_values]:
@@ -526,7 +527,7 @@ class PermissionValidator:
                                     "reason": f"Value not in allowed: {allowed_values}",
                                 }
                             )
-
+        print(f.get("value"))
         result["missing_filters"] = missing
         result["invalid_values"] = invalid
         result["allowed"] = len(missing) == 0 and len(invalid) == 0

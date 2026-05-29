@@ -77,6 +77,36 @@ class SQLValidatorOutput(BaseModel):
         return self.logical_ok and not self.errors
 
 
+def _build_authorization_policy_prompt(
+    authorization_policy: dict[str, Any],
+) -> str:
+    tables = authorization_policy.get("tables", {})
+    if not tables:
+        return ""
+    lines = [
+        "=== AUTHORIZATION POLICY (apply before user query, non-negotiable) ===",
+        "These WHERE conditions MUST appear in the final SQL exactly as specified.",
+        "Rules:",
+        "  - Use the real base column name, never a SELECT-list alias.",
+        "  - Single value:    WHERE col = <value>",
+        "  - Multiple values: WHERE col IN (<v1>, <v2>, ...)",
+        "  - Do not remove, alias, substitute, or move these to a subquery.",
+        "  - These take priority over all user query intent.",
+        "",
+    ]
+    for table, cols in tables.items():
+        lines.append(f"Table: {table}")
+        for col, rule in cols.items():
+            vals = rule["values"]
+            ftype = rule["filter_type"]
+            lines.append(f"  Column     : {col}")
+            lines.append(f"  Type       : {ftype}")
+            lines.append(f"  Must equal : {vals}")
+        lines.append("")
+    lines.append("=== END AUTHORIZATION POLICY ===")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # LLM validation system prompt
 # ---------------------------------------------------------------------------
@@ -533,6 +563,8 @@ def sql_validator_node(
     if not isinstance(join_paths, list):
         join_paths = []
 
+    authorization_policy: dict[str, Any] = state.get("authorization_policy") or {}
+
     # Format contexts for LLM using shared helpers
     try:
         schemas_context = _format_schemas_for_llm(schemas)
@@ -550,7 +582,15 @@ def sql_validator_node(
     logger.info("Layer 2: LLM semantic check")
     semantic = validate_sql_with_llm(
         llm=llm,
-        user_query=user_query,
+        user_query=(
+            f"{policy_prompt}\n\nUser query:{user_query}"
+            if (
+                policy_prompt := _build_authorization_policy_prompt(
+                    authorization_policy
+                )
+            )
+            else user_query
+        ),
         generated_sql=sql,
         schemas_context=schemas_context,
         seed_tables=seed_tables,
@@ -559,9 +599,17 @@ def sql_validator_node(
     )
     logger.info(f"Semantic: valid={semantic.valid}, retry={semantic.retry}")
 
-    # Merge — retry only when there are actual critical issues
+    # Merge — retry only when there are actual critical issues.
     needs_retry = structural.needs_retry or semantic.retry
     logical_ok = not needs_retry
+
+    # If RBAC already confirmed the SQL is valid and structural validation
+    # did not fail, do not let the semantic layer re-trigger a retry for
+    # warnings or style-only issues.
+    if state.get("validation_passed") is True and not structural.needs_retry:
+        if not semantic.critical_issues:
+            needs_retry = False
+            logical_ok = True
 
     all_issues: list[str] = []
     if structural.needs_retry:
@@ -595,23 +643,35 @@ def sql_validator_node(
         f"score={output.score}, issues={len(all_issues)}"
     )
 
+    # If RBAC already passed and nothing needs another retry, clear the
+    # authorization policy so it does not remain sticky downstream.
+    validation_result_safe = state.get("validation_result") or {}
+    rbac_already_passed = state.get(
+        "validation_passed"
+    ) is True and not validation_result_safe.get("needs_retry", True)
+    forward_policy = {} if rbac_already_passed else authorization_policy
+
+    forward_retry_feedback = (
+        None
+        if rbac_already_passed or not needs_retry
+        else {
+            "issues": semantic.critical_issues + semantic.concept_gaps,
+            "reasoning": semantic.reasoning,
+            "failed_sql": sql,
+            "hint": semantic.suggested_fix,
+            "authorization_policy": forward_policy,
+            "attempt": state.get("retry_count", 0) + 1,
+        }
+    )
+
     final_state = {
         **state,
         "validation_result": output.model_dump(),
         "validation_passed": logical_ok,
         "validation_errors": all_issues,
         "suggested_fix": semantic.suggested_fix,
-        "retry_feedback": (
-            {
-                "issues": semantic.critical_issues + semantic.concept_gaps,
-                "reasoning": semantic.reasoning,
-                "failed_sql": sql,
-                "hint": semantic.suggested_fix,
-                "attempt": state.get("retry_count", 0) + 1,
-            }
-            if needs_retry
-            else state.get("retry_feedback")
-        ),
+        "authorization_policy": forward_policy,
+        "retry_feedback": forward_retry_feedback,
     }
 
     _append_validation_log(

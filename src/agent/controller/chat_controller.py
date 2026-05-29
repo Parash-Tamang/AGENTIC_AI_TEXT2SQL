@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import Any, List, Literal, Optional
 from src.agent.prompt import initialize_pipeline_sync, AgentPromptClient
 from src.agent.prompt.pipeline import promptFunction
 
@@ -75,6 +75,20 @@ class ChatRequest(BaseModel):
     )
 
 
+class ExcelResponse(BaseModel):
+    format: Literal["EXCEL"] = "EXCEL"
+    rowcount: int
+    columns: List[str] = Field(default_factory=list)
+    rows: List[dict[str, Any]] = Field(default_factory=list)
+
+
+def _build_excel_response(
+    graph_data: Any, final_state: dict[str, Any]
+) -> dict[str, Any]:
+    excel = final_state.get("excel") or {}
+    return excel if isinstance(excel, dict) else {}
+
+
 @router.post("/", response_model=ApiResult)
 async def handle_chat(request: ChatRequest) -> ApiResult:
     try:
@@ -128,6 +142,7 @@ async def handle_chat(request: ChatRequest) -> ApiResult:
         response_session_context = extract_from_state(final_state)
         # Include visualization graph data (image) in API response if available
         graph_out = None
+        excel_out = None
         graph_data = final_state.get("graph_data")
         if isinstance(graph_data, dict):
             graph_out = {
@@ -139,13 +154,18 @@ async def handle_chat(request: ChatRequest) -> ApiResult:
                 graph_out["value"] = graph_data.get("value")
 
             # Include PNG bytes as a Base64 string (safe for JSON transport)
-            png = graph_data.get("png_bytes")
-            if png:
+            image_base64 = graph_data.get("image_base64") or graph_data.get("png_bytes")
+            if image_base64:
                 try:
-                    graph_out["png_bytes"] = base64.b64encode(png).decode("ascii")
+                    if isinstance(image_base64, bytes):
+                        graph_out["image_base64"] = base64.b64encode(
+                            image_base64
+                        ).decode("ascii")
+                    else:
+                        graph_out["image_base64"] = str(image_base64)
                     graph_out["image_mime"] = "image/png"
                 except Exception:
-                    graph_out["png_bytes"] = None
+                    graph_out["image_base64"] = None
 
             # Include server-side saved path if present and expose as an URL
             image_path = graph_data.get("image_path")
@@ -155,6 +175,8 @@ async def handle_chat(request: ChatRequest) -> ApiResult:
                 graph_out["image_url"] = f"/{image_path}"
                 graph_out["image_path"] = image_path
 
+        excel_out = _build_excel_response(graph_data, final_state)
+
         return ApiResult(
             success=True,
             message="Processed successfully.",
@@ -162,6 +184,7 @@ async def handle_chat(request: ChatRequest) -> ApiResult:
                 "response": response_text,
                 "session_context": response_session_context.model_dump(),
                 "graph": graph_out,
+                "excel": excel_out,
             },
         )
 

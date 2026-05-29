@@ -17,6 +17,7 @@ from src.agent.nodes.decomposition import query_decomposer_node
 from src.agent.nodes.views_agent import views_fetcher_node
 from src.agent.nodes.schema_agent import schema_fetcher_node
 from src.agent.nodes.sql_generator import sql_generator_node
+from src.agent.nodes.rbac_enforcer import rbac_enforcer_node
 from src.agent.nodes.sql_validator import sql_validator_node
 from src.agent.tools.executor import executor_node
 from src.agent.nodes.sql_results_validator import (
@@ -27,6 +28,7 @@ from src.agent.nodes.generate_response import response_generator_node
 # routers
 from src.agent.orchestrator.router import (
     intent_router,
+    rbac_router,
     sql_validation_router,
     validation_router,
 )
@@ -45,7 +47,8 @@ def build_graph(llm) -> StateGraph:
     sg.add_node("views_fetcher", views_fetcher_node)
     sg.add_node("schema_fetcher", schema_fetcher_node)
     sg.add_node("sql_generator", lambda s: sql_generator_node(sql_llm, s))
-    sg.add_node("sql_validator", sql_validator_node)
+    sg.add_node("rbac_enforcer", rbac_enforcer_node)
+    sg.add_node("sql_validator", lambda s: sql_validator_node(llm, s))
     sg.add_node("executor", executor_node)
     sg.add_node(
         "sql_post_execution_validator",
@@ -59,9 +62,19 @@ def build_graph(llm) -> StateGraph:
     sg.add_edge("query_decomposer", "views_fetcher")
     sg.add_edge("views_fetcher", "schema_fetcher")
     sg.add_edge("schema_fetcher", "sql_generator")
-    sg.add_edge("sql_generator", "sql_validator")
+    sg.add_edge("sql_generator", "rbac_enforcer")
     sg.add_edge("executor", "sql_post_execution_validator")
     sg.add_edge("response_generator", END)
+
+    sg.add_conditional_edges(
+        "rbac_enforcer",
+        rbac_router,
+        {
+            "response": "response_generator",
+            "sql_generator": "sql_generator",
+            "sql_validator": "sql_validator",
+        },
+    )
 
     # ── conditional edges (routers) ───────────────────────────────────────
     sg.add_conditional_edges(
