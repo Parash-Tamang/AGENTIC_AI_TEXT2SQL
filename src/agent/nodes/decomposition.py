@@ -10,6 +10,12 @@ from src.agent.utils.pretty_print import pretty_log
 from src.agent.prompt.decomposition import DECOMPOSITION_SYSTEM
 from src.agent.utils.prompt_utils import resolve_system_prompt
 
+DOMAIN_CONTEXT_USAGE_INSTRUCTION = (
+    "Use the provided domain context as the primary source for understanding the business domain, entities, relationships, terminology, and user intent. "
+    "Refer to it when interpreting questions, resolving ambiguities, identifying relevant entities, and making business-aware decisions. "
+    "Prioritize the domain context over assumptions and ensure all reasoning remains consistent with the described business processes and relationships."
+)
+
 
 class SubQuery(BaseModel):
     order: int
@@ -71,6 +77,7 @@ def query_decomposer(
         {
             "ConstructedQuery": constructed_query,
             "DomainContext": domain_context,
+            "DomainContextUsageInstruction": DOMAIN_CONTEXT_USAGE_INSTRUCTION,
         },
         ensure_ascii=False,
     )

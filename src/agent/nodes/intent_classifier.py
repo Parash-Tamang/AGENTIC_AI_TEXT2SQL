@@ -43,6 +43,12 @@ INTENT_ROUTE_MAP = {
 EXCEL_MARKER = "/excel"
 GRAPH_MARKER = "/graph"
 
+DOMAIN_CONTEXT_USAGE_INSTRUCTION = (
+    "Use the provided domain context as the primary source for understanding the business domain, entities, relationships, terminology, and user intent. "
+    "Refer to it when interpreting questions, resolving ambiguities, identifying relevant entities, and making business-aware decisions. "
+    "Prioritize the domain context over assumptions and ensure all reasoning remains consistent with the described business processes and relationships."
+)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Output dataclass  (what the node writes into state["intent"])
@@ -133,6 +139,7 @@ class IntentClassifier:
             {
                 "ConstructedQuery": constructed_query,
                 "DomainContext": domain_context or "general",
+                "DomainContextUsageInstruction": DOMAIN_CONTEXT_USAGE_INSTRUCTION,
             },
             ensure_ascii=False,
         )

@@ -57,6 +57,10 @@ class ConnectionConfig(BaseModel):
 class ChatRequest(BaseModel):
     user_id: str = Field(..., description="Unique identifier for the user")
     query: str = Field(..., description="The user's input query")
+    domain_context: str = Field(
+        default="AdventureWorksLT2019 is a sample business database for a fictional company called Adventure Works, a manufacturer and retailer of bicycles and cycling accessories. The database captures the company's sales operations, including customers, products, product categories, orders, and customer addresses. Customers place sales orders that contain one or more products, generating revenue for the business. Products are organized into categories such as bikes, accessories, and clothing, and each product has associated pricing and cost information. The database supports analysis of customer purchasing behavior, product performance, sales trends, and geographic distribution of sales. Key business questions typically involve identifying top customers, best-selling products, revenue and profit trends, order statistics, and sales performance across regions. The central business workflow follows the path: Customer → Sales Order → Order Details → Product → Product Category, making it possible to analyze who purchased which products, when they were purchased, where customers are located, and how much revenue was generated. This database is commonly used for business intelligence, reporting, analytics, and Text-to-SQL applications because it provides a realistic representation of a retail sales domain with well-defined relationships between customers, products, and transactions.",
+        description="Domain context for intent/decomposition, e.g., sales, hr, finance",
+    )
     user_role: str = Field(
         ..., description="Caller role for RBAC (e.g., customer, sales, admin)"
     )
@@ -134,6 +138,7 @@ async def handle_chat(request: ChatRequest) -> ApiResult:
             prompt_client=prompt_client,
             session_context=session_context,
             user_role=effective_role,
+            domain_context=request.domain_context,
         )
 
         response_text = final_state.get(

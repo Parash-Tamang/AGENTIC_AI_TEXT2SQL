@@ -53,6 +53,7 @@ async def run_chat_pipeline(
     connection: Any,
     user_role: str,
     model_name: str,
+    domain_context: str = "general",
     prompt_client: Any = None,
     session_context: SessionContext | None = None,
 ) -> dict[str, Any]:
@@ -112,6 +113,7 @@ async def run_chat_pipeline(
     initial_state = create_initial_state(
         user_query=user_query,
         user_role=user_role,
+        domain_context=domain_context,
         history=history,
         connection=connection_data,
     )

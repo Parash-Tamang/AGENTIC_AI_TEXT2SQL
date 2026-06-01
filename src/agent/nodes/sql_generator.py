@@ -41,6 +41,12 @@ SQL_GENERATION_LOG = LOG_DIR / "sql_generation.jsonl"
 
 MAX_RETRIES = 2
 
+DOMAIN_CONTEXT_USAGE_INSTRUCTION = (
+    "Use the provided domain context as the primary source for understanding the business domain, entities, relationships, terminology, and user intent. "
+    "Refer to it when interpreting questions, resolving ambiguities, identifying relevant entities, and making business-aware decisions. "
+    "Prioritize the domain context over assumptions and ensure all reasoning remains consistent with the described business processes and relationships."
+)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Pydantic models
@@ -547,6 +553,7 @@ def sql_generator_node(
     # LLM uses the user's intent. The RBAC enforcer locks values after validation.
     mandatory_filters: dict[str, dict] = state.get("mandatory_filters", {})
     authorization_policy: dict[str, Any] = state.get("authorization_policy") or {}
+    domain_context: str = str(state.get("domain_context") or "general")
 
     if not user_query:
         return _fail("No constructed query in state")
@@ -570,6 +577,8 @@ def sql_generator_node(
 
     base_payload: dict[str, Any] = {
         "UserQuery": user_query,
+        "DomainContext": domain_context,
+        "DomainContextUsageInstruction": DOMAIN_CONTEXT_USAGE_INSTRUCTION,
         "SeedTables": seed_tables_ctx,
         "AuthoritativeTables": authoritative_block,
         "Schemas": schemas_context,
@@ -795,7 +804,7 @@ def sql_generator_node(
                 hallucinated_tables = r_tables
                 hallucinated_cols = r_cols
 
-        if attempt < MAX_RETRIES:
+        if current_attempt <= MAX_RETRIES:
             user_prompt = _inject_correction(
                 user_prompt, hallucinated_tables, hallucinated_cols
             )

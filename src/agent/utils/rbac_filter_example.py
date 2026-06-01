@@ -37,6 +37,7 @@ def example_customer_own_profile():
     print(f"  Reason: {result['reason']}")
     print(f"  Access Level: {result['access_level']}")
     print(f"  Required Filters: {result['required_filters']}")
+
     exit(0)
 
 

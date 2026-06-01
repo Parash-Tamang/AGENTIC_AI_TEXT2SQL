@@ -26,6 +26,12 @@ RESPONSE_LOG = LOG_DIR / "response_generator.jsonl"
 _MAX_RESULT_ROWS_IN_PROMPT = 20
 _MAX_HISTORY_TURNS = 10
 
+DOMAIN_CONTEXT_USAGE_INSTRUCTION = (
+    "Use the provided domain context as the primary source for understanding the business domain, entities, relationships, terminology, and user intent. "
+    "Refer to it when interpreting questions, resolving ambiguities, identifying relevant entities, and making business-aware decisions. "
+    "Prioritize the domain context over assumptions and ensure all reasoning remains consistent with the described business processes and relationships."
+)
+
 
 def _normalize_state(state: Any) -> Dict[str, Any]:
     if isinstance(state, dict):
@@ -319,12 +325,15 @@ def _build_user_prompt(
     results_summary: Dict[str, Any],
     history: List[Dict[str, str]],
     schema_summary: _SchemaSummary,
+    domain_context: str = "general",
     graph_data: Optional[Dict[str, Any]] = None,
     excel_data: Optional[Dict[str, Any]] = None,
 ) -> str:
     payload: Dict[str, Any] = {
         "user_raw_query": user_query,
         "constructed_query": constructed_query,
+        "domain_context": domain_context,
+        "domain_context_usage_instruction": DOMAIN_CONTEXT_USAGE_INSTRUCTION,
         "results_summary": results_summary,
         "conversation_history": history,
     }
@@ -388,6 +397,7 @@ def response_generator_node(
 ) -> Dict[str, Any]:
     state_data = _normalize_state(state)
     user_query = str(state_data.get("user_query", "")).strip()
+    domain_context = str(state_data.get("domain_context") or "general")
     if not user_query:
         return {**state_data, "response_error": "no_user_query"}
 
@@ -439,6 +449,8 @@ def response_generator_node(
         user_prompt = json.dumps(
             {
                 "user_raw_query": user_query,
+                "domain_context": domain_context,
+                "domain_context_usage_instruction": DOMAIN_CONTEXT_USAGE_INSTRUCTION,
                 "conversation_history": history,
                 "instruction": instruction,
             },
@@ -545,6 +557,8 @@ def response_generator_node(
         conv_payload = json.dumps(
             {
                 "user_raw_query": user_query,
+                "domain_context": domain_context,
+                "domain_context_usage_instruction": DOMAIN_CONTEXT_USAGE_INSTRUCTION,
                 "conversation_history": history,
                 "instruction": instruction,
                 "clarify_hint": clarify_msg,
@@ -615,6 +629,7 @@ def response_generator_node(
         results_summary,
         history,
         schema_summary,
+        domain_context,
         state_data.get("graph_data"),
         state_data.get("excel"),
     )

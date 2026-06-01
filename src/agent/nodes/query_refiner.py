@@ -80,6 +80,12 @@ _ISSUE_HINTS: Dict[str, str] = {
     "execution_error": "Avoid complex expressions; simplify the query.",
 }
 
+DOMAIN_CONTEXT_USAGE_INSTRUCTION = (
+    "Use the provided domain context as the primary source for understanding the business domain, entities, relationships, terminology, and user intent. "
+    "Refer to it when interpreting questions, resolving ambiguities, identifying relevant entities, and making business-aware decisions. "
+    "Prioritize the domain context over assumptions and ensure all reasoning remains consistent with the described business processes and relationships."
+)
+
 
 # ---------------------------------------------------------------------------
 # Pydantic models
@@ -218,6 +224,7 @@ def _build_session_context_block(state: Dict[str, Any]) -> Optional[str]:
 def _build_user_prompt(
     user_query: str,
     feedback: Optional[RetryFeedback],
+    domain_context: Optional[str] = None,
     session_context_block: Optional[str] = None,
 ) -> str:
     """
@@ -229,7 +236,11 @@ def _build_user_prompt(
     if feedback is None and session_context_block is None:
         return user_query
 
-    prompt_obj: Dict[str, Any] = {"CurrentQuery": user_query}
+    prompt_obj: Dict[str, Any] = {
+        "CurrentQuery": user_query,
+        "DomainContext": domain_context or "general",
+        "DomainContextUsageInstruction": DOMAIN_CONTEXT_USAGE_INSTRUCTION,
+    }
 
     if feedback is not None:
         hint = _build_retry_hint(feedback)
@@ -325,6 +336,7 @@ def query_refiner(
         The same ``state`` dict with ``construct`` and ``refined_query`` set.
     """
     user_query: str = state.get("user_query", "")
+    domain_context: str = state.get("domain_context", "general")
     history: List[Dict[str, Any]] = state.get("history", [])
     raw_feedback: Any = state.get("retry_feedback")
 
@@ -336,7 +348,12 @@ def query_refiner(
 
     # Build prompt
     prompt: str = system_prompt or REFINER_SYSTEM
-    user_prompt: str = _build_user_prompt(user_query, feedback, session_context_block)
+    user_prompt: str = _build_user_prompt(
+        user_query,
+        feedback,
+        domain_context,
+        session_context_block,
+    )
 
     logger.debug(
         "query_refiner called | has_feedback=%s | has_session_context=%s | query=%r",
@@ -443,6 +460,7 @@ def query_refiner(
             state={
                 "user_query": user_query,
                 "refined_query": state.get("refined_query"),
+                "domain_context": domain_context,
             },
             llm_metrics={"token_breakdown": {}, "latency_ms": None},
             extra={

@@ -7,7 +7,7 @@ from typing import Optional, List, Dict
 from .base import BaseLLM
 from src.agent.observability import log_llm_call
 
-_RETRY_AFTER_DEFAULT = 10  # NVIDIA NIM is more stable, shorter default wait
+_RETRY_AFTER_DEFAULT = 10
 _BASE_BACKOFF = 1
 
 
@@ -24,7 +24,7 @@ class NvidiaLLM(BaseLLM):
 
         self.client = OpenAI(
             base_url="https://integrate.api.nvidia.com/v1",
-            api_key=api_key,  # starts with nvapi-
+            api_key=api_key,
         )
 
         self.model = model
@@ -32,13 +32,11 @@ class NvidiaLLM(BaseLLM):
         self.max_retries = max_retries
 
     # ------------------------------------------------------------------
-    # Internal helpers  (same pattern as GroqLLM)
+    # Internal helpers
     # ------------------------------------------------------------------
 
     def _retry_after(self, e: APIStatusError) -> float:
-        """
-        Extract wait time from Retry-After header, or fall back to default.
-        """
+        """Extract wait time from Retry-After header, or fall back to default."""
         headers = getattr(e, "response", None)
         headers = getattr(headers, "headers", {}) if headers else {}
         retry_after = headers.get("retry-after") or headers.get("Retry-After")
@@ -64,7 +62,7 @@ class NvidiaLLM(BaseLLM):
         return messages
 
     # ------------------------------------------------------------------
-    # Main generate  (same signature as GroqLLM)
+    # Main generate
     # ------------------------------------------------------------------
 
     def generate(
@@ -89,11 +87,12 @@ class NvidiaLLM(BaseLLM):
                     "temperature": self.temperature,
                 }
 
-                # JSON mode — same behaviour as GroqLLM
+                # NVIDIA NIM only supports {"type": "json_object"}.
+                # {"type": "json_schema", ...} is silently ignored by the API,
+                # causing the model to return unconstrained output.
+                # Schema enforcement is handled entirely by the system prompt.
                 if json_mode:
-                    kwargs["response_format"] = response_format or {
-                        "type": "json_object"
-                    }
+                    kwargs["response_format"] = {"type": "json_object"}
 
                 if tools:
                     kwargs["tools"] = tools
@@ -102,7 +101,7 @@ class NvidiaLLM(BaseLLM):
                 response = self.client.chat.completions.create(**kwargs)
                 message = response.choices[0].message
 
-                # Native tool-call response (same shape as GroqLLM)
+                # Native tool-call response
                 if message.tool_calls:
                     tool_call = message.tool_calls[0]
                     output = json.dumps(
@@ -114,7 +113,9 @@ class NvidiaLLM(BaseLLM):
                             "ISREL": True,
                             "ISSUP": False,
                             "ISUSE": 0.5,
-                            "reasoning": f"LLM issued native tool call: {tool_call.function.name}",
+                            "reasoning": (
+                                f"LLM issued native tool call: {tool_call.function.name}"
+                            ),
                         }
                     )
                     log_llm_call(
