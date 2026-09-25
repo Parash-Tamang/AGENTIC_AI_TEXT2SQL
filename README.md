@@ -26,7 +26,6 @@ A user asks a natural-language question, the system generates and executes SQL u
 ![Prompt Editor — system function list](./docs/screenshots/prompt-editor-list.jpeg)
 ![Prompt Editor — editing REFINER_SYSTEM](./docs/screenshots/prompt-editor-detail.jpeg)
 
-*(Save your screenshots into a `docs/screenshots/` folder in the repo with these filenames, or rename the paths above to match yours.)*
 
 ## Overview
 
