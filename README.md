@@ -9,7 +9,7 @@ Built with LangGraph, FastAPI, and a .NET Core API layer. Tested against Adventu
 **Chat interface (TalkToDB):**
 A user asks a natural-language question, the system generates and executes SQL under their role's permissions, then returns a chart and downloadable Excel file.
 
-![TalkToDB chat interface](.chat-query.jpeg)
+![TalkToDB chat interface](chat-query.jpeg)
 ![Generated bar chart](./docs/screenshots/chat-chart.png)
 ![Excel export](./docs/screenshots/excel-export.png)
 
