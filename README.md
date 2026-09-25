@@ -100,7 +100,6 @@ AGENTIC_AI_TEXT2SQL/
 
 ## APIs
 
-*(Inferred from the admin UI and chat product — confirm/rename to match your actual route names.)*
 
 | Endpoint (example) | Purpose |
 |---|---|
